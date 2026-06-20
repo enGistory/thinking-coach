@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+/data/
+audio/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+node_modules/
+dist/
+.vite/
+.coverage
+htmlcov/
+
+# 必须提交 services/backend/uv.lock；不要将其加入忽略列表。

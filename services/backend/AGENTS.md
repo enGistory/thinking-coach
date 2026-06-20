@@ -1,0 +1,15 @@
+# Backend 局部规则
+- API 层只做鉴权、参数校验、状态转换和服务调用；不得直接写 Prompt、SQL 或评分规则。
+- Provider 必须通过协议隔离：LLM、STT、TTS、Embedding、Search、ContentFetcher。
+- P0 实现为 Aliyun Provider，测试必须有 Mock Provider；不得安装本地模型运行时。
+- Settings 使用 `pydantic-settings`；Secret 使用 `SecretStr`；启动时校验 Key、Base URL 和模型 ID。
+- 所有 AI 调用记录 provider、model、request_id、latency、tokens/字符/秒数、prompt_version、structured_ok 和 error_code，但不得记录密钥或完整敏感正文。
+- 所有数据库变更使用 Alembic；repository 方法必须显式按 `user_id` 过滤。
+- 后台耗时任务写入 `ai_job` 并由 worker 领取；接口不得长期阻塞等待完整评审。
+- 运行：`uv run ruff check . && uv run mypy app && uv run pytest -q`。
+- Python 版本以 `.python-version` 和 `requires-python` 为准；不得自行切换到 3.13/3.14。
+- 直接依赖只能在 `pyproject.toml` 中维护并使用精确版本；禁止手工 `pip install` 后不落盘。
+- P00 必须生成并提交 `uv.lock`；日常使用 `uv sync --locked --all-groups`。
+- 普通任务不得刷新全部锁文件；新增或升级依赖必须单独获批并运行 `scripts/verify_dependency_policy.py`。
+- 使用 LangGraph standalone + 自定义 Provider；不得新增完整 `langchain`、`langchain-openai`、预构建 Agent 或 LCEL 主流程。
+- 不得添加 `torch`、`transformers`、`faster-whisper`、`funasr`、`modelscope`、CUDA 或其他本地模型依赖。

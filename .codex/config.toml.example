@@ -1,0 +1,67 @@
+# AI 语音思维训练系统：项目级 Codex 配置
+# 放置位置：<repository>/.codex/config.toml
+# 只在该仓库被标记为 trusted 时加载，不要覆盖 ~/.codex/config.toml。
+
+# 主开发模型。OpenAI 官方配置文档当前以 gpt-5.5 为示例。
+model = "gpt-5.5"
+
+# /review 使用的模型；保持与主模型一致，避免评审能力下降。
+review_model = "gpt-5.5"
+
+# 普通开发任务的推理强度。
+model_reasoning_effort = "high"
+
+# /plan 模式的推理强度；复杂阶段任务要求充分规划。
+plan_mode_reasoning_effort = "high"
+
+# 显示简洁的推理摘要，不输出冗长内部过程。
+model_reasoning_summary = "concise"
+
+# 控制模型最终回答的详细程度。
+model_verbosity = "medium"
+
+# 使用务实、工程化的沟通风格。
+personality = "pragmatic"
+
+# 命令需要提升权限、越出沙箱或执行敏感动作时向用户申请。
+approval_policy = "on-request"
+
+# 允许修改当前工作区，但不授予整机文件系统访问。
+sandbox_mode = "workspace-write"
+
+# 默认使用 OpenAI 维护的缓存搜索索引；需要最新网页时临时使用 --search。
+web_search = "cached"
+
+# 点击 Codex 输出中的文件引用时使用 VS Code 打开。
+file_opener = "vscode"
+
+# 允许根目录及嵌套目录的 AGENTS 指令合计最多读取 64 KiB。
+project_doc_max_bytes = 65536
+
+# 对所有会话附加的项目级保护指令；详细规则仍以 AGENTS.md 为准。
+developer_instructions = """
+Read and obey the repository AGENTS.md, docs/SPEC.md, docs/SOP.md, and the single active task file before editing. Keep changes minimal and verifiable. Do not read .env or production data. Do not invoke third-party skills unless the user or active task explicitly names them. Do not commit, push, deploy, create parallel specifications, add dependencies, or refresh uv.lock unless the active task explicitly authorizes it.
+"""
+
+# workspace-write 沙箱中的 shell 命令默认不能直接访问外网。
+# pip/npm 安装、curl 和第三方脚本会触发额外批准，避免技能静默联网。
+[sandbox_workspace_write]
+network_access = false
+
+# 控制 Codex 稳定功能。
+[features]
+# 保留显式多 Agent/技能能力，但由 AGENTS.md 和并发限制约束。
+multi_agent = true
+# 关闭跨会话 Memories，避免其他项目或旧会话信息影响当前项目。
+memories = false
+# 禁止技能自动安装缺失的 MCP 依赖；需要时由用户手工批准和安装。
+skill_mcp_dependency_install = false
+
+# 限制子 Agent 数量和嵌套，防止 gstack/superpowers 等技能扩大执行范围。
+[agents]
+max_threads = 3
+max_depth = 1
+
+# 仅在原生 Windows 上生效；官方推荐 elevated 沙箱。
+[windows]
+sandbox = "elevated"
