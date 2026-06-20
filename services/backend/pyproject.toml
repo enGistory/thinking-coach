@@ -83,8 +83,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "9.0"
-addopts = "-q --strict-config --strict-markers"
+addopts = "-q --strict-config --strict-markers --basetemp=.pytest-tmp"
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
   "integration: requires PostgreSQL or another external service",

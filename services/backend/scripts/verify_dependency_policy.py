@@ -59,16 +59,16 @@ def main() -> int:
 
     if data["project"].get("version") != EXPECTED_PROJECT_VERSION:
         errors.append(
-            f"项目版本必须为 {EXPECTED_PROJECT_VERSION}，实际为 "
+            f"project version must be {EXPECTED_PROJECT_VERSION}; actual: "
             f"{data['project'].get('version')}"
         )
 
     if data["project"].get("requires-python") != ">=3.12,<3.13":
-        errors.append("requires-python 必须为 >=3.12,<3.13")
+        errors.append("requires-python must be >=3.12,<3.13")
 
     pinned_python = PYTHON_VERSION_FILE.read_text(encoding="utf-8").strip()
     if pinned_python != EXPECTED_PYTHON:
-        errors.append(f".python-version 应为 {EXPECTED_PYTHON}，实际为 {pinned_python}")
+        errors.append(f".python-version must be {EXPECTED_PYTHON}; actual: {pinned_python}")
 
     dependencies = dependency_lists(data)
     direct_by_name = {canonical_name(requirement): requirement for requirement in dependencies}
@@ -76,59 +76,64 @@ def main() -> int:
     for requirement in dependencies:
         name = canonical_name(requirement)
         if "==" not in requirement:
-            errors.append(f"直接依赖未使用精确版本：{requirement}")
+            errors.append(f"direct dependency is not pinned exactly: {requirement}")
         if name in FORBIDDEN:
-            errors.append(f"发现禁止的本地模型/GPU依赖：{requirement}")
+            errors.append(f"forbidden local model/GPU dependency found: {requirement}")
         if name in FORBIDDEN_DIRECT:
             errors.append(
-                f"当前架构不直接引入完整 LangChain 高层包：{requirement}；"
-                "如确需使用，必须先建立 ADR 并更新 SPEC/依赖策略"
+                f"full LangChain package is not allowed in P0: {requirement}; "
+                "create an ADR before changing this boundary"
             )
 
     for name, version in REQUIRED_DIRECT.items():
         requirement = direct_by_name.get(name)
         if requirement is None:
-            errors.append(f"缺少必需直接依赖：{name}=={version}")
+            errors.append(f"required direct dependency is missing: {name}=={version}")
         elif f"=={version}" not in requirement:
-            errors.append(f"{name} 必须固定为 {version}，实际为：{requirement}")
+            errors.append(f"{name} must be pinned to {version}; actual: {requirement}")
 
     if LOCK_FILE.exists():
         lock_data = tomllib.loads(LOCK_FILE.read_text(encoding="utf-8"))
         locked_versions = {
-            package.get("name"): package.get("version")
-            for package in lock_data.get("package", [])
+            package.get("name"): package.get("version") for package in lock_data.get("package", [])
         }
         if locked_versions.get("langchain-core") != REQUIRED_DIRECT["langchain-core"]:
             errors.append(
-                "锁文件中的 langchain-core 必须为 "
-                f"{REQUIRED_DIRECT['langchain-core']}，实际为 "
+                "uv.lock langchain-core must be "
+                f"{REQUIRED_DIRECT['langchain-core']}; actual: "
                 f"{locked_versions.get('langchain-core')}"
             )
+        for forbidden_name in FORBIDDEN:
+            if forbidden_name in locked_versions:
+                errors.append(f"uv.lock contains forbidden dependency: {forbidden_name}")
         for forbidden_name in FORBIDDEN_DIRECT:
             if forbidden_name in locked_versions:
-                errors.append(f"uv.lock 中发现未经批准的高层依赖：{forbidden_name}")
+                errors.append(
+                    f"uv.lock contains unapproved high-level dependency: {forbidden_name}"
+                )
 
     if sys.version_info[:2] != (3, 12):
         errors.append(
-            f"当前 Python 为 {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}，"
-            "项目要求 Python 3.12.x"
+            "current Python is "
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}; "
+            "project requires Python 3.12.x"
         )
 
     try:
         output = subprocess.check_output(["uv", "--version"], text=True).strip()
         match = re.search(r"(\d+\.\d+\.\d+)", output)
         if not match or match.group(1) != EXPECTED_UV:
-            errors.append(f"uv 应为 {EXPECTED_UV}，实际输出为：{output}")
+            errors.append(f"uv must be {EXPECTED_UV}; actual output: {output}")
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        errors.append(f"无法检测 uv：{exc}")
+        errors.append(f"failed to detect uv: {exc}")
 
     if errors:
-        print("依赖策略校验失败：")
+        print("Dependency policy verification failed:")
         for error in errors:
             print(f"- {error}")
         return 1
 
-    print("依赖策略校验通过。")
+    print("Dependency policy verification passed.")
     return 0
 
 

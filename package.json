@@ -1,0 +1,18 @@
+{
+  "name": "thinking-coach",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.26.1",
+  "scripts": {
+    "web:dev": "pnpm --dir apps/web dev",
+    "web:lint": "pnpm --dir apps/web lint",
+    "web:type-check": "pnpm --dir apps/web type-check",
+    "web:test": "pnpm --dir apps/web test",
+    "web:build": "pnpm --dir apps/web build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

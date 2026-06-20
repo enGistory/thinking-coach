@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+
+env:
+  UV_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+  PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+  NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: services/backend/.python-version
+      - name: Install uv
+        run: python -m pip install "uv==0.11.23"
+      - name: Check locked dependencies
+        run: |
+          uv --version
+          uv lock --check
+          uv sync --locked --all-groups
+      - name: Verify dependency policy
+        run: uv run python scripts/verify_dependency_policy.py
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Type check
+        run: uv run mypy app
+      - name: Test
+        run: uv run pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.26.1 --activate
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm --dir apps/web lint
+      - name: Type check
+        run: pnpm --dir apps/web type-check
+      - name: Test
+        run: pnpm --dir apps/web test
+      - name: Build
+        run: pnpm --dir apps/web build
