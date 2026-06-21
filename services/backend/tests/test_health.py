@@ -16,7 +16,11 @@ def test_health_returns_all_p00_checks(monkeypatch, tmp_path: Path) -> None:
         return None
 
     def test_settings() -> Settings:
-        return Settings(audio_root=tmp_path, database_url="postgresql+asyncpg://example")
+        return Settings(
+            _env_file=None,
+            audio_root=tmp_path,
+            database_url="postgresql+asyncpg://example",
+        )
 
     monkeypatch.setattr(health_module, "check_database", database_ok)
     get_settings.cache_clear()
@@ -42,7 +46,11 @@ def test_health_degrades_when_audio_root_is_missing(monkeypatch, tmp_path: Path)
     missing_audio_root = tmp_path / "missing"
 
     def test_settings() -> Settings:
-        return Settings(audio_root=missing_audio_root, database_url="postgresql+asyncpg://example")
+        return Settings(
+            _env_file=None,
+            audio_root=missing_audio_root,
+            database_url="postgresql+asyncpg://example",
+        )
 
     monkeypatch.setattr(health_module, "check_database", database_ok)
     get_settings.cache_clear()
