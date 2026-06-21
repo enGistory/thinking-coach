@@ -15,9 +15,31 @@ env:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: thinking_test
+          POSTGRES_USER: thinking
+          POSTGRES_PASSWORD: thinking
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U thinking -d thinking_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     defaults:
       run:
         working-directory: services/backend
+    env:
+      AI_PROVIDER_MODE: mock
+      AUDIO_ROOT: /tmp
+      JWT_SECRET: ci-jwt-secret-that-is-long-enough
+      DATABASE_URL: postgresql+asyncpg://thinking:thinking@127.0.0.1:5432/thinking_test?ssl=disable
+      DATABASE_SYNC_URL: postgresql+psycopg://thinking:thinking@127.0.0.1:5432/thinking_test?sslmode=disable
+      TEST_DATABASE_URL: postgresql+asyncpg://thinking:thinking@127.0.0.1:5432/thinking_test?ssl=disable
+      TEST_DATABASE_SYNC_URL: postgresql+psycopg://thinking:thinking@127.0.0.1:5432/thinking_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

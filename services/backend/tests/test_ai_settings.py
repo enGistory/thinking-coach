@@ -161,3 +161,21 @@ def test_safe_ai_summary_does_not_expose_secret() -> None:
     assert "sk-real-secret" not in summary_text
     assert "dashscope_api_key" not in summary_text
     assert '"dashscope_key_configured":true' in summary_text
+
+
+def test_auth_requires_jwt_secret() -> None:
+    settings = Settings(_env_file=None, jwt_secret=None)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        settings.validate_auth()
+
+    assert exc_info.value.code == "JWT_SECRET_MISSING"
+
+
+def test_auth_accepts_configured_jwt_secret() -> None:
+    settings = Settings(
+        _env_file=None,
+        jwt_secret=SecretStr("test-jwt-secret-that-is-long-enough"),
+    )
+
+    settings.validate_auth()

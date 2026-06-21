@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi import APIRouter
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from app.api.v1 import health as health_module
-from app.core.config import Settings, get_settings
+from app.core.config import ConfigurationError, Settings, get_settings
 from app.main import create_app
 
 
@@ -37,6 +38,26 @@ def test_health_returns_all_p00_checks(monkeypatch, tmp_path: Path) -> None:
     assert body["request_id"] == "req-test"
     assert set(body["checks"]) == {"app", "database", "audio_root"}
     assert body["checks"]["database"]["ok"] is True
+
+
+def test_startup_rejects_missing_jwt_secret(monkeypatch, tmp_path: Path) -> None:
+    def test_settings() -> Settings:
+        return Settings(
+            _env_file=None,
+            ai_provider_mode="mock",
+            jwt_secret=None,
+            audio_root=tmp_path,
+            database_url="postgresql+asyncpg://example",
+        )
+
+    get_settings.cache_clear()
+    monkeypatch.setattr("app.main.get_settings", test_settings)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        with TestClient(create_app()):
+            pass
+
+    assert exc_info.value.code == "JWT_SECRET_MISSING"
 
 
 def test_health_degrades_when_audio_root_is_missing(monkeypatch, tmp_path: Path) -> None:

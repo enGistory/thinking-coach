@@ -219,6 +219,15 @@ class Settings(BaseSettings):
                 f"{name} still contains an unresolved WorkspaceId placeholder",
             )
 
+    def validate_auth(self) -> None:
+        """Validate authentication startup configuration without exposing secrets."""
+
+        if not self._secret_has_value(self.jwt_secret):
+            raise ConfigurationError(
+                "JWT_SECRET_MISSING",
+                "JWT_SECRET must be configured",
+            )
+
 
 @lru_cache
 def get_settings() -> Settings:
