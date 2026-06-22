@@ -11,6 +11,7 @@ from app.api.v1.health import router as health_router
 from app.api.v1.invitations import admin_router as admin_invitations_router
 from app.api.v1.invitations import router as invitations_router
 from app.api.v1.me import router as me_router
+from app.api.v1.trainings import router as trainings_router
 from app.core.config import get_settings
 from app.core.errors import install_exception_handlers
 from app.core.request_id import request_id_middleware
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(invitations_router)
     app.include_router(me_router)
+    app.include_router(trainings_router)
     app.include_router(admin_router)
     app.include_router(admin_invitations_router)
     return app

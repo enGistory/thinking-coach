@@ -6,6 +6,8 @@ secrets/
 *.key
 /data/
 audio/
+!apps/web/src/audio/
+!apps/web/src/audio/**
 .venv/
 __pycache__/
 *.pyc
