@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createVoiceAttempt, uploadAttemptAudio } from "./training";
+import { createVoiceAttempt, fetchAttemptTranscript, uploadAttemptAudio } from "./training";
 
 interface FetchCall {
   input: RequestInfo | URL;
@@ -81,5 +81,41 @@ describe("training API", () => {
     expect(formData.get("duration_ms")).toBe("1200");
     expect(formData.get("checksum_sha256")).toBe("a".repeat(64));
     expect(formData.get("audio")).toBeInstanceOf(File);
+  });
+
+  it("fetches timestamped transcript with bearer auth", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          attempt_id: "attempt-1",
+          status: "SUCCEEDED",
+          raw_text: "你好",
+          corrected_text: "你好",
+          language: "zh",
+          error_code: null,
+          metrics: { segment_count: 1 },
+          segments: [
+            {
+              id: "segment-1",
+              segment_index: 0,
+              start_ms: 0,
+              end_ms: 1000,
+              raw_text: "你好",
+              corrected_text: "你好",
+              words: [{ text: "你好", start_ms: 0, end_ms: 1000, confidence: null }],
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const response = await fetchAttemptTranscript("token-1", "attempt-1");
+
+    expect(response.segments[0]?.start_ms).toBe(0);
+    expect(calls[0]?.input).toBe("/api/v1/attempts/attempt-1/transcript");
+    expect(calls[0]?.init?.headers).toEqual({ Authorization: "Bearer token-1" });
   });
 });

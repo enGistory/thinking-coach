@@ -113,6 +113,20 @@ class TrainingRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_attempt_with_session(
+        self,
+        attempt_id: UUID,
+    ) -> tuple[VoiceAttempt, TrainingSession] | None:
+        result = await self._session.execute(
+            select(VoiceAttempt, TrainingSession)
+            .join(TrainingSession, VoiceAttempt.session_id == TrainingSession.id)
+            .where(VoiceAttempt.id == attempt_id)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return row[0], row[1]
+
     async def _latest_waiting_first_audio_session(self, user_id: UUID) -> TrainingSession | None:
         result = await self._session.execute(
             select(TrainingSession)

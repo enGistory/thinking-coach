@@ -150,6 +150,86 @@ h1 {
   width: 100%;
 }
 
+.transcript {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #e4eaee;
+  padding-top: 16px;
+}
+
+.transcript-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.transcript-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.transcript-header span {
+  color: #4b5b65;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.metric-grid div {
+  border: 1px solid #d8e0e6;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.metric-grid dt {
+  color: #667782;
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.metric-grid dd {
+  margin: 4px 0 0;
+  color: #172026;
+  overflow-wrap: anywhere;
+}
+
+.segment-list {
+  display: grid;
+  gap: 8px;
+}
+
+.segment-button {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border-color: #cad5dc;
+  background: #ffffff;
+  color: #172026;
+  text-align: left;
+}
+
+.segment-button span {
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.segment-button strong {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
 .error {
   margin: 18px 0 0;
   border: 1px solid #f0b4ac;
@@ -181,5 +261,13 @@ h1 {
   .meta div {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .segment-button {
+    grid-template-columns: 1fr;
   }
 }

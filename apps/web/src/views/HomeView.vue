@@ -6,11 +6,15 @@ import {
   createCurrentTraining,
   createVoiceAttempt,
   fetchAttemptAudio,
+  fetchAttemptTranscript,
   uploadAttemptAudio,
+  type AttemptTranscriptResponse,
+  type TranscriptSegmentResponse,
   type TrainingSessionResponse,
   type VoiceAttemptResponse,
 } from "../api/training";
 import { sha256Hex } from "../audio/checksum";
+import { seekPlaybackToSegment, type SeekablePlayback } from "../audio/playbackSeek";
 import {
   AUTO_STOP_AUDIO_SECONDS,
   buildRecorderOptions,
@@ -43,7 +47,9 @@ const statusMessage = ref("等待登录");
 const errorMessage = ref("");
 const remainingSeconds = ref(MAX_AUDIO_SECONDS);
 const playbackUrl = ref("");
+const transcript = ref<AttemptTranscriptResponse | null>(null);
 const pendingAttemptId = ref(readLocalValue(PENDING_ATTEMPT_KEY));
+const playbackAudio = ref<SeekablePlayback | null>(null);
 
 const isAuthenticated = computed(() => accessToken.value.length > 0);
 const canStartRecording = computed(
@@ -57,6 +63,7 @@ let chunks: Blob[] = [];
 let recordingStartedAt = 0;
 let countdownTimer: number | undefined;
 let autoStopTimer: number | undefined;
+let transcriptPollTimer: number | undefined;
 let inMemoryPendingRecord: PendingAudioRecord | null = null;
 
 onMounted(() => {
@@ -68,6 +75,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   clearRecordingTimers();
+  stopTranscriptPolling();
   stopMediaTracks();
   revokePlaybackUrl();
 });
@@ -251,6 +259,7 @@ async function uploadPendingRecord(record: PendingAudioRecord) {
   recorderState.value = "uploaded";
   statusMessage.value = "上传成功";
   await loadPlayback(record.attemptId);
+  startTranscriptPolling(record.attemptId);
 }
 
 async function loadPlayback(attemptId: string) {
@@ -264,9 +273,11 @@ async function loadPlayback(attemptId: string) {
 
 async function startNextRecording() {
   clearMessages();
+  stopTranscriptPolling();
   revokePlaybackUrl();
   trainingSession.value = null;
   attempt.value = null;
+  transcript.value = null;
   recorderState.value = "idle";
   statusMessage.value = "可开始下一条录音";
   await ensureTrainingSession();
@@ -326,6 +337,41 @@ function clearRecordingTimers() {
     globalThis.clearTimeout(autoStopTimer);
     autoStopTimer = undefined;
   }
+}
+
+function startTranscriptPolling(attemptId: string) {
+  stopTranscriptPolling();
+  void pollTranscript(attemptId);
+  transcriptPollTimer = globalThis.setInterval(() => {
+    void pollTranscript(attemptId);
+  }, 2000);
+}
+
+async function pollTranscript(attemptId: string) {
+  if (!accessToken.value) {
+    return;
+  }
+  try {
+    transcript.value = await fetchAttemptTranscript(accessToken.value, attemptId);
+    if (transcript.value.status === "SUCCEEDED" || transcript.value.status === "FAILED") {
+      stopTranscriptPolling();
+    }
+  } catch (error) {
+    if (recorderState.value === "uploaded") {
+      errorMessage.value = errorToMessage(error, "读取转写失败");
+    }
+  }
+}
+
+function stopTranscriptPolling() {
+  if (transcriptPollTimer !== undefined) {
+    globalThis.clearInterval(transcriptPollTimer);
+    transcriptPollTimer = undefined;
+  }
+}
+
+function seekToSegment(segment: TranscriptSegmentResponse) {
+  seekPlaybackToSegment(playbackAudio.value, segment);
 }
 
 function stopMediaTracks() {
@@ -499,10 +545,53 @@ function removeLocalValue(key: string) {
 
         <audio
           v-if="playbackUrl"
+          ref="playbackAudio"
           :src="playbackUrl"
           class="playback"
           controls
         />
+
+        <section
+          v-if="transcript"
+          class="transcript"
+          aria-labelledby="transcript-title"
+        >
+          <div class="transcript-header">
+            <h2 id="transcript-title">
+              转写片段
+            </h2>
+            <span>{{ transcript.status }}</span>
+          </div>
+          <dl
+            v-if="transcript.metrics"
+            class="metric-grid"
+          >
+            <div>
+              <dt>语音</dt>
+              <dd>{{ transcript.metrics.effective_speech_ms ?? 0 }}ms</dd>
+            </div>
+            <div>
+              <dt>语速</dt>
+              <dd>{{ transcript.metrics.speech_rate_cpm ?? "—" }}</dd>
+            </div>
+            <div>
+              <dt>停顿</dt>
+              <dd>{{ Array.isArray(transcript.metrics.long_pauses) ? transcript.metrics.long_pauses.length : 0 }}</dd>
+            </div>
+          </dl>
+          <div class="segment-list">
+            <button
+              v-for="segment in transcript.segments"
+              :key="segment.id"
+              class="segment-button"
+              type="button"
+              @click="seekToSegment(segment)"
+            >
+              <span>{{ (segment.start_ms / 1000).toFixed(1) }}s</span>
+              <strong>{{ segment.corrected_text }}</strong>
+            </button>
+          </div>
+        </section>
       </div>
 
       <p

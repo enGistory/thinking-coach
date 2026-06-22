@@ -13,12 +13,22 @@ from app.api.dependencies import get_current_user
 from app.core.config import Settings, get_settings
 from app.db.models import AppUser, TrainingSession, VoiceAttempt
 from app.db.session import get_session
+from app.repositories.jobs import AIJobRepository
 from app.repositories.training_policy import TrainingPolicyRepository
 from app.repositories.trainings import TrainingRepository
+from app.repositories.transcripts import (
+    TranscriptBundle,
+    TranscriptCorrectionRejected,
+    TranscriptRepository,
+)
 from app.schemas.training import (
+    AttemptTranscriptResponse,
     AudioUploadResponse,
     CreateAttemptRequest,
     TrainingSessionResponse,
+    TranscriptCorrectionRequest,
+    TranscriptSegmentResponse,
+    TranscriptWordResponse,
     VoiceAttemptResponse,
 )
 from app.services.audio_storage import (
@@ -83,6 +93,8 @@ async def upload_attempt_audio(
     attempt = await _get_owned_attempt_for_update(session, attempt_id, current_user.id)
     if attempt.upload_status == "UPLOADED":
         if attempt.checksum_sha256 == checksum_sha256:
+            await _ensure_transcription_job(session, attempt)
+            await session.commit()
             return _audio_upload_response(attempt)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -119,6 +131,7 @@ async def upload_attempt_audio(
         days=await _retention_days(session, current_user.id, settings)
     )
     attempt.uploaded_at = datetime.now(UTC)
+    await _ensure_transcription_job(session, attempt)
     await session.commit()
     return _audio_upload_response(attempt)
 
@@ -149,6 +162,47 @@ async def get_attempt_audio(
         media_type=attempt.mime_type or "application/octet-stream",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get("/attempts/{attempt_id}/transcript", response_model=AttemptTranscriptResponse)
+async def get_attempt_transcript(
+    attempt_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AttemptTranscriptResponse:
+    bundle = await TranscriptRepository(session).get_owned_bundle(
+        attempt_id=attempt_id,
+        user_id=current_user.id,
+    )
+    if bundle is None:
+        raise _not_found()
+    return _transcript_response(bundle)
+
+
+@router.patch(
+    "/attempts/{attempt_id}/transcript-correction",
+    response_model=AttemptTranscriptResponse,
+)
+async def correct_attempt_transcript(
+    attempt_id: UUID,
+    payload: TranscriptCorrectionRequest,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AttemptTranscriptResponse:
+    try:
+        bundle = await TranscriptRepository(session).apply_segment_correction(
+            attempt_id=attempt_id,
+            segment_id=payload.segment_id,
+            user_id=current_user.id,
+            corrected_text=payload.corrected_text,
+            reason=payload.reason,
+        )
+    except TranscriptCorrectionRejected as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code) from exc
+    if bundle is None:
+        raise _not_found()
+    await session.commit()
+    return _transcript_response(bundle)
 
 
 async def _get_owned_attempt_for_update(
@@ -184,6 +238,11 @@ async def _retention_days(session: AsyncSession, user_id: UUID, settings: Settin
     if policy is None:
         return settings.audio_retention_days
     return policy.retention_days
+
+
+async def _ensure_transcription_job(session: AsyncSession, attempt: VoiceAttempt) -> None:
+    await TranscriptRepository(session).ensure_pending(attempt.id)
+    await AIJobRepository(session).enqueue_transcribe_attempt(attempt.id)
 
 
 def _training_session_response(training_session: TrainingSession) -> TrainingSessionResponse:
@@ -222,6 +281,43 @@ def _audio_upload_response(attempt: VoiceAttempt) -> AudioUploadResponse:
         size_bytes=attempt.size_bytes,
         checksum_sha256=attempt.checksum_sha256,
         uploaded_at=attempt.uploaded_at,
+    )
+
+
+def _transcript_response(bundle: TranscriptBundle) -> AttemptTranscriptResponse:
+    return AttemptTranscriptResponse(
+        attempt_id=bundle.transcript.attempt_id,
+        status=bundle.transcript.status,
+        raw_text=bundle.transcript.raw_text,
+        corrected_text=bundle.transcript.corrected_text,
+        language=bundle.transcript.language,
+        error_code=bundle.transcript.error_code,
+        metrics=bundle.transcript.metrics_json,
+        segments=[
+            TranscriptSegmentResponse(
+                id=segment.id,
+                segment_index=segment.segment_index,
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                raw_text=segment.raw_text,
+                corrected_text=segment.corrected_text,
+                words=[_word_response(word) for word in segment.words_json],
+            )
+            for segment in bundle.segments
+        ],
+    )
+
+
+def _word_response(word: dict[str, object]) -> TranscriptWordResponse:
+    text = word.get("text")
+    start_ms = word.get("start_ms")
+    end_ms = word.get("end_ms")
+    confidence = word.get("confidence")
+    return TranscriptWordResponse(
+        text=text if isinstance(text, str) else "",
+        start_ms=start_ms if isinstance(start_ms, int) else 0,
+        end_ms=end_ms if isinstance(end_ms, int) else 0,
+        confidence=float(confidence) if isinstance(confidence, int | float) else None,
     )
 
 

@@ -22,6 +22,34 @@ export interface VoiceAttemptResponse {
   uploaded_at: string | null;
 }
 
+export interface TranscriptWordResponse {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  confidence: number | null;
+}
+
+export interface TranscriptSegmentResponse {
+  id: string;
+  segment_index: number;
+  start_ms: number;
+  end_ms: number;
+  raw_text: string;
+  corrected_text: string;
+  words: TranscriptWordResponse[];
+}
+
+export interface AttemptTranscriptResponse {
+  attempt_id: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  raw_text: string;
+  corrected_text: string;
+  language: string | null;
+  error_code: string | null;
+  metrics: Record<string, unknown> | null;
+  segments: TranscriptSegmentResponse[];
+}
+
 export async function createCurrentTraining(accessToken: string): Promise<TrainingSessionResponse> {
   return requestJson<TrainingSessionResponse>("/api/v1/trainings/current", {
     method: "POST",
@@ -70,6 +98,15 @@ export async function fetchAttemptAudio(accessToken: string, attemptId: string):
     throw new Error(`音频回放失败：${response.status}`);
   }
   return await response.blob();
+}
+
+export async function fetchAttemptTranscript(
+  accessToken: string,
+  attemptId: string,
+): Promise<AttemptTranscriptResponse> {
+  return requestJson<AttemptTranscriptResponse>(`/api/v1/attempts/${attemptId}/transcript`, {
+    headers: authHeaders(accessToken),
+  });
 }
 
 function preferredFilename(mimeType: string): string {

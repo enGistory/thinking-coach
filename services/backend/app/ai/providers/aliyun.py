@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from time import perf_counter
 from typing import Any, cast
@@ -273,11 +274,10 @@ class AliyunFunASRProvider:
         kwargs["diarization_enabled"] = request.diarization_enabled
         task_response = transcription_cls.async_call(**kwargs)
         if _status_code_from_response(task_response) >= 400:
-            raise ProviderError(
-                "ASR_SUBMIT_FAILED",
-                "fun-asr task submission failed",
-                provider=ALIYUN_PROVIDER_NAME,
-                request_id=_request_id_from_response(task_response),
+            raise _provider_error_from_dashscope_response(
+                task_response,
+                fallback_code="ASR_SUBMIT_FAILED",
+                fallback_message="fun-asr task submission failed",
             )
         task_output = _mapping_from_object(getattr(task_response, "output", task_response))
         task_id = task_output.get("task_id")
@@ -290,11 +290,10 @@ class AliyunFunASRProvider:
             )
         wait_response = transcription_cls.wait(task=task_id)
         if _status_code_from_response(wait_response) >= 400:
-            raise ProviderError(
-                "ASR_WAIT_FAILED",
-                "fun-asr task wait failed",
-                provider=ALIYUN_PROVIDER_NAME,
-                request_id=_request_id_from_response(wait_response),
+            raise _provider_error_from_dashscope_response(
+                wait_response,
+                fallback_code="ASR_WAIT_FAILED",
+                fallback_message="fun-asr task wait failed",
             )
         return wait_response
 
@@ -441,6 +440,34 @@ def _request_id_from_response(value: object) -> str | None:
     if isinstance(request_id, str):
         return request_id
     return None
+
+
+def _provider_error_from_dashscope_response(
+    value: object,
+    *,
+    fallback_code: str,
+    fallback_message: str,
+) -> ProviderError:
+    upstream_code = _string_value(getattr(value, "code", None))
+    if upstream_code:
+        error_code = f"ASR_{_provider_error_suffix(upstream_code)}"
+        message = f"{fallback_message}: {upstream_code}"
+    else:
+        status_code = _status_code_from_response(value)
+        error_code = f"ASR_HTTP_{status_code}" if status_code >= 400 else fallback_code
+        message = fallback_message
+    return ProviderError(
+        error_code,
+        message,
+        provider=ALIYUN_PROVIDER_NAME,
+        request_id=_request_id_from_response(value),
+    )
+
+
+def _provider_error_suffix(value: str) -> str:
+    with_word_boundaries = re.sub(r"(?<!^)(?=[A-Z])", "_", value.strip())
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", with_word_boundaries).strip("_").upper()
+    return normalized or "PROVIDER_ERROR"
 
 
 def _parse_asr_transcript(payload: Mapping[str, object]) -> Transcript:

@@ -168,6 +168,42 @@ async def test_fun_asr_provider_downloads_and_parses_transcript(monkeypatch) -> 
     assert response.metadata.usage.audio_duration_seconds == 1.0
 
 
+def test_fun_asr_provider_preserves_dashscope_submit_error(monkeypatch) -> None:
+    class FakeTranscription:
+        @staticmethod
+        def async_call(**kwargs: object) -> object:
+            assert kwargs["file_urls"] == ["https://signed.example/audio.webm?Signature=secret"]
+            return SimpleNamespace(
+                status_code=401,
+                code="InvalidApiKey",
+                message="Invalid API-key provided.",
+                request_id="asr-401",
+            )
+
+    fake_dashscope = SimpleNamespace()
+    fake_asr_module = SimpleNamespace(Transcription=FakeTranscription)
+
+    def fake_import_module(name: str) -> object:
+        if name == "dashscope":
+            return fake_dashscope
+        if name == "dashscope.audio.asr":
+            return fake_asr_module
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr(aliyun_module.importlib, "import_module", fake_import_module)
+    provider = AliyunFunASRProvider(aliyun_settings())
+
+    with pytest.raises(ProviderError) as exc_info:
+        provider._submit_and_wait(
+            STTRequest(audio_url="https://signed.example/audio.webm?Signature=secret")
+        )
+
+    assert exc_info.value.error_code == "ASR_INVALID_API_KEY"
+    assert exc_info.value.request_id == "asr-401"
+    assert "signed.example" not in str(exc_info.value)
+    assert "secret" not in str(exc_info.value)
+
+
 @respx.mock
 async def test_fun_asr_provider_redacts_signed_result_url_on_download_error() -> None:
     signed_url = "https://signed.example/result.json?Signature=secret-token"
