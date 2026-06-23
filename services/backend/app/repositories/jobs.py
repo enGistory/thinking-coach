@@ -11,6 +11,7 @@ from app.db.models import AIJob
 
 GRAPH_RESUME_JOB = "GRAPH_RESUME"
 TRANSCRIBE_ATTEMPT_JOB = "TRANSCRIBE_ATTEMPT"
+EVALUATE_SESSION_JOB = "EVALUATE_SESSION"
 AI_JOB_LEASE_SECONDS = 30 * 60
 AI_JOB_MAX_RETRIES = 2
 TRANSCRIBE_JOB_LEASE_SECONDS = AI_JOB_LEASE_SECONDS
@@ -25,6 +26,10 @@ def graph_resume_idempotency_key(
     round_number: int,
 ) -> str:
     return f"graph_resume:{session_id}:{stage.lower()}:{round_number}:{attempt_id}"
+
+
+def evaluation_idempotency_key(session_id: UUID) -> str:
+    return f"evaluate_session:{session_id}"
 
 
 class AIJobRepository:
@@ -77,6 +82,29 @@ class AIJobRepository:
         job = await self.get_by_idempotency_key(idempotency_key)
         if job is None:
             raise RuntimeError("graph resume job upsert did not return a row")
+        return job
+
+    async def enqueue_evaluate_session(
+        self,
+        *,
+        session_id: UUID,
+        user_id: UUID,
+    ) -> AIJob:
+        idempotency_key = evaluation_idempotency_key(session_id)
+        statement = (
+            insert(AIJob)
+            .values(
+                job_type=EVALUATE_SESSION_JOB,
+                payload={"session_id": str(session_id), "user_id": str(user_id)},
+                status="PENDING",
+                idempotency_key=idempotency_key,
+            )
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        )
+        await self._session.execute(statement)
+        job = await self.get_by_idempotency_key(idempotency_key)
+        if job is None:
+            raise RuntimeError("evaluation job upsert did not return a row")
         return job
 
     async def claim_next(self, job_type: str) -> AIJob | None:

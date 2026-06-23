@@ -28,7 +28,7 @@ from app.db.models import AIJob, AttemptTranscript, TrainingSession, VoiceAttemp
 from app.db.session import get_session
 from app.main import create_app
 from app.repositories.auth import UserRepository
-from app.repositories.jobs import GRAPH_RESUME_JOB
+from app.repositories.jobs import EVALUATE_SESSION_JOB, GRAPH_RESUME_JOB
 from app.workers import main as worker_module
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
@@ -89,7 +89,7 @@ async def client(
     get_settings.cache_clear()
 
 
-async def test_voice_training_graph_completes_three_attempts(
+async def test_voice_training_graph_queues_evaluation_after_three_attempts(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -167,12 +167,16 @@ async def test_voice_training_graph_completes_three_attempts(
             .select_from(VoiceAttempt)
             .where(VoiceAttempt.session_id == UUID(session_id))
         )
+        evaluation_job_count = await session.scalar(
+            select(func.count()).select_from(AIJob).where(AIJob.job_type == EVALUATE_SESSION_JOB)
+        )
 
     assert first_attempt_id is not None
     assert stored_session is not None
-    assert stored_session.stage == "COMPLETED"
-    assert stored_session.completed_at is not None
+    assert stored_session.stage == "EVALUATING"
+    assert stored_session.completed_at is None
     assert attempt_count == 3
+    assert evaluation_job_count == 1
 
 
 async def test_repeated_resume_reuses_graph_job(

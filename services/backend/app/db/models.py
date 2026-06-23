@@ -4,9 +4,11 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -309,6 +311,147 @@ class TranscriptCorrection(Base):
     )
 
 
+class QuestionRubric(Base):
+    __tablename__ = "question_rubric"
+    __table_args__ = (
+        UniqueConstraint(
+            "training_session_id",
+            "version",
+            name="uq_question_rubric_session_version",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    training_session_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("training_session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    question_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    dimensions_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    expected_elements_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    fatal_omissions_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    frozen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class PromptVersion(Base):
+    __tablename__ = "prompt_version"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_prompt_version_name_version"),)
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class EvaluationReport(Base):
+    __tablename__ = "evaluation_report"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'COMPLETED', 'INVALID', 'FAILED')",
+            name="ck_evaluation_report_status",
+        ),
+        UniqueConstraint("session_id", name="uq_evaluation_report_session_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    session_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("training_session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    rubric_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question_rubric.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    logic_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    speech_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    adaptability_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    final_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    details_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class EvaluationIssue(Base):
+    __tablename__ = "evaluation_issue"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('logic', 'speech', 'adaptability')",
+            name="ck_issue_category",
+        ),
+        CheckConstraint("confidence IN ('low', 'medium', 'high')", name="ck_issue_confidence"),
+        UniqueConstraint(
+            "report_id",
+            "attempt_id",
+            "code",
+            "quote",
+            "start_ms",
+            "end_ms",
+            name="uq_evaluation_issue_evidence",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    report_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("evaluation_report.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("voice_attempt.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transcript_segment_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("transcript_segment.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    quote: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    missing_information: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    correction_rule: Mapped[str] = mapped_column(Text, nullable=False)
+    verification_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class AIJob(Base):
     __tablename__ = "ai_job"
     __table_args__ = (
@@ -336,4 +479,43 @@ class AIJob(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class ModelRun(Base):
+    __tablename__ = "model_run"
+    __table_args__ = (
+        Index("ix_model_run_report_id", "report_id"),
+        Index("ix_model_run_job_id", "job_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    job_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("ai_job.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    report_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("evaluation_report.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    prompt_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_characters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_characters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    structured_ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_summary_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    output_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )

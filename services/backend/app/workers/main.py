@@ -15,8 +15,14 @@ from app.graphs.voice_training import (
     load_voice_training_state,
     resume_voice_training,
 )
-from app.repositories.jobs import GRAPH_RESUME_JOB, TRANSCRIBE_ATTEMPT_JOB, AIJobRepository
+from app.repositories.jobs import (
+    EVALUATE_SESSION_JOB,
+    GRAPH_RESUME_JOB,
+    TRANSCRIBE_ATTEMPT_JOB,
+    AIJobRepository,
+)
 from app.repositories.transcripts import TranscriptRepository
+from app.services.evaluation import EvaluationService
 from app.services.transcription import TranscriptionService
 
 POLL_SECONDS = 1.0
@@ -29,7 +35,7 @@ ADVANCED_SESSION_STAGES_BY_RESUME_STAGE = {
         "COMPLETED",
     },
     "FOLLOWUP": {"EVALUATING", "WAIT_FINAL_AUDIO", "COMPLETED"},
-    "FINAL": {"COMPLETED"},
+    "FINAL": {"EVALUATING", "COMPLETED"},
 }
 ADVANCED_GRAPH_STAGES_BY_RESUME_STAGE = {
     "FIRST": {
@@ -40,7 +46,7 @@ ADVANCED_GRAPH_STAGES_BY_RESUME_STAGE = {
         "COMPLETED",
     },
     "FOLLOWUP": {"EVALUATING", "WAIT_FINAL_AUDIO", "COMPLETED"},
-    "FINAL": {"COMPLETED"},
+    "FINAL": {"EVALUATING", "COMPLETED"},
 }
 
 
@@ -50,6 +56,8 @@ async def run_worker() -> None:
     bundle = create_provider_bundle(settings)
     while True:
         processed = await run_graph_resume_job_once(bundle=bundle)
+        if not processed:
+            processed = await run_evaluation_job_once(bundle=bundle)
         if not processed:
             processed = await run_transcription_job_once(stt_provider=bundle.stt)
         if not processed:
@@ -96,6 +104,42 @@ async def run_graph_resume_job_once(*, bundle: ProviderBundle) -> bool:
             stage=stage,
             round_number=round_number,
         )
+        await _mark_job_succeeded(job_id)
+    except Exception as exc:
+        async with maker() as session:
+            job_repo = AIJobRepository(session)
+            job = await job_repo.get_by_id(job_id)
+            if job is not None:
+                error_code = _error_code(exc)
+                await job_repo.mark_retryable_failure(job, error_code)
+                if job.status == "FAILED" and session_id is not None:
+                    await _mark_session_failed_retryable(session, session_id)
+            await session.commit()
+    return True
+
+
+async def run_evaluation_job_once(*, bundle: ProviderBundle) -> bool:
+    maker = get_sessionmaker()
+    session_id: UUID | None = None
+    async with maker() as session:
+        job_repo = AIJobRepository(session)
+        job = await job_repo.claim_next(EVALUATE_SESSION_JOB)
+        if job is None:
+            await session.rollback()
+            return False
+        job_id = job.id
+        payload = job.payload
+        await session.commit()
+
+    try:
+        session_id = _uuid_from_payload(payload, "session_id")
+        user_id = _uuid_from_payload(payload, "user_id")
+        async with maker() as session:
+            await EvaluationService(
+                session=session,
+                llm_provider=bundle.llm,
+            ).evaluate_session(session_id=session_id, user_id=user_id, job_id=job_id)
+            await session.commit()
         await _mark_job_succeeded(job_id)
     except Exception as exc:
         async with maker() as session:

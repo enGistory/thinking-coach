@@ -5,10 +5,10 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any, TypedDict, cast
 from uuid import UUID
 
+from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
@@ -23,6 +23,7 @@ from app.ai.providers.contracts import (
 )
 from app.core.config import Settings
 from app.db.models import TrainingSession
+from app.repositories.jobs import AIJobRepository
 from app.repositories.trainings import TrainingRepository
 from app.services.transcription import TranscriptionService
 
@@ -127,6 +128,27 @@ async def load_voice_training_state(
     deps: VoiceTrainingDeps,
     thread_id: str,
 ) -> TrainingState:
+    return await asyncio.to_thread(_load_voice_training_state_sync, deps, thread_id)
+
+
+def _load_voice_training_state_sync(
+    deps: VoiceTrainingDeps,
+    thread_id: str,
+) -> TrainingState:
+    conninfo = _psycopg_conninfo(deps.settings.database_sync_url)
+    with PostgresSaver.from_conn_string(conninfo) as checkpointer:
+        checkpointer.setup()
+        graph = build_voice_training_graph(deps, checkpointer)
+        snapshot = graph.get_state(_thread_config(thread_id))
+    values = getattr(snapshot, "values", {}) or {}
+    return cast(TrainingState, dict(values))
+
+
+async def load_voice_training_state_async(
+    *,
+    deps: VoiceTrainingDeps,
+    thread_id: str,
+) -> TrainingState:
     async with open_postgres_checkpointer(deps.settings) as checkpointer:
         graph = build_voice_training_graph(deps, checkpointer)
         snapshot = await graph.aget_state(_thread_config(thread_id))
@@ -136,7 +158,7 @@ async def load_voice_training_state(
 
 def build_voice_training_graph(
     deps: VoiceTrainingDeps,
-    checkpointer: AsyncPostgresSaver,
+    checkpointer: Any,
 ) -> Any:
     workflow = StateGraph(TrainingState)
     workflow.add_node("wait_first_audio", _wait_first_audio)
@@ -277,8 +299,8 @@ def _process_final_answer(deps: VoiceTrainingDeps) -> GraphNode:
         attempt_id = _uuid_from_state(state, "final_attempt_id")
         await _set_session_stage(deps, session_id, user_id, "EVALUATING")
         await _transcribe_attempt(deps, attempt_id)
-        await _complete_session(deps, session_id, user_id)
-        return {"current_stage": "COMPLETED", "error_code": None}
+        await _enqueue_evaluation(deps, session_id, user_id)
+        return {"current_stage": "EVALUATING", "error_code": None}
 
     return process_final
 
@@ -346,7 +368,7 @@ async def _set_session_stage(
         await session.commit()
 
 
-async def _complete_session(
+async def _enqueue_evaluation(
     deps: VoiceTrainingDeps,
     session_id: UUID,
     user_id: UUID,
@@ -358,8 +380,11 @@ async def _complete_session(
         )
         if training_session is None:
             raise VoiceTrainingError("SESSION_NOT_FOUND", "Training session was not found")
-        training_session.stage = "COMPLETED"
-        training_session.completed_at = datetime.now(UTC)
+        training_session.stage = "EVALUATING"
+        await AIJobRepository(session).enqueue_evaluate_session(
+            session_id=session_id,
+            user_id=user_id,
+        )
         await session.commit()
 
 
