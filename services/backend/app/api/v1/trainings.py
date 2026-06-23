@@ -31,6 +31,7 @@ from app.repositories.transcripts import (
     TranscriptCorrectionRejected,
     TranscriptRepository,
 )
+from app.schemas.defects import AppealRequest, AppealResponse
 from app.schemas.training import (
     AttemptTranscriptResponse,
     AudioUploadResponse,
@@ -50,6 +51,7 @@ from app.services.audio_storage import (
     resolve_stored_audio_path,
     save_audio_upload,
 )
+from app.services.defects import DefectMemoryError, DefectMemoryService
 
 router = APIRouter(prefix="/api/v1", tags=["trainings"])
 
@@ -311,6 +313,45 @@ async def correct_attempt_transcript(
         raise _not_found()
     await session.commit()
     return _transcript_response(bundle)
+
+
+@router.post(
+    "/trainings/{session_id}/appeals",
+    response_model=AppealResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_training_appeal(
+    session_id: UUID,
+    payload: AppealRequest,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AppealResponse:
+    try:
+        appeal = await DefectMemoryService(session=session).create_appeal(
+            user_id=current_user.id,
+            session_id=session_id,
+            appeal_type=payload.type,
+            reason=payload.reason,
+            issue_id=payload.issue_id,
+            defect_code=payload.defect_code,
+        )
+    except DefectMemoryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=exc.code,
+        ) from exc
+    await session.commit()
+    return AppealResponse(
+        id=appeal.id,
+        session_id=appeal.session_id,
+        issue_id=appeal.issue_id,
+        defect_code=appeal.defect_code,
+        type=appeal.type,
+        status=appeal.status,
+        reason=appeal.reason,
+        resolution=appeal.resolution,
+        created_at=appeal.created_at,
+    )
 
 
 async def _get_owned_attempt_for_update(

@@ -22,6 +22,7 @@ from app.schemas.evaluation import (
     LogicReview,
     SpeechReview,
 )
+from app.services.defects import DefectMemoryService
 
 PROMPT_VERSION = "v1.0.0"
 SCHEMA_VERSION = "p06-evaluation-v1"
@@ -95,6 +96,10 @@ class EvaluationService:
             raise EvaluationError("EVALUATION_SESSION_NOT_FOUND", "training session not found")
         existing = await repo.get_report_by_session(session_id)
         if existing is not None and existing.status == "COMPLETED":
+            await DefectMemoryService(session=self._session).sync_report(
+                report_id=existing.id,
+                user_id=context.training_session.user_id,
+            )
             return existing
 
         _ensure_ready_for_evaluation(context.attempts)
@@ -146,6 +151,10 @@ class EvaluationService:
         )
         context.training_session.stage = "COMPLETED"
         context.training_session.completed_at = datetime.now(UTC)
+        await DefectMemoryService(session=self._session).sync_report(
+            report_id=completed.id,
+            user_id=context.training_session.user_id,
+        )
         await self._session.flush()
         return completed
 

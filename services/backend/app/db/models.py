@@ -452,6 +452,235 @@ class EvaluationIssue(Base):
     )
 
 
+class DefectDefinition(Base):
+    __tablename__ = "defect_definition"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    detection_rule: Mapped[str] = mapped_column(Text, nullable=False)
+    score_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class Appeal(Base):
+    __tablename__ = "appeal"
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('evaluation', 'defect_classification')",
+            name="ck_appeal_type",
+        ),
+        CheckConstraint(
+            "status IN ('OPEN', 'REVIEWED_ACCEPTED', 'REVIEWED_REJECTED')",
+            name="ck_appeal_status",
+        ),
+        Index("ix_appeal_user_session", "user_id", "session_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("training_session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    issue_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("evaluation_issue.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    defect_code: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("defect_definition.code", ondelete="SET NULL"),
+        nullable=True,
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="OPEN")
+    resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DefectOccurrence(Base):
+    __tablename__ = "defect_occurrence"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'ACTIVE', 'SUSPENDED', 'EXCLUDED')",
+            name="ck_defect_occurrence_status",
+        ),
+        CheckConstraint(
+            "previous_status IS NULL OR previous_status IN ('PENDING', 'ACTIVE')",
+            name="ck_defect_occurrence_previous_status",
+        ),
+        CheckConstraint(
+            "confidence IN ('low', 'medium', 'high')",
+            name="ck_defect_occurrence_confidence",
+        ),
+        UniqueConstraint(
+            "session_id",
+            "issue_id",
+            "defect_code",
+            name="uq_defect_occurrence_session_issue_code",
+        ),
+        Index("ix_defect_occurrence_user_code", "user_id", "defect_code"),
+        Index("ix_defect_occurrence_issue_id", "issue_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("training_session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    issue_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("evaluation_issue.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    defect_code: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("defect_definition.code", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_issue_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    scenario_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    attempt_stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    severity: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    previous_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    suspending_appeal_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("appeal.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class DefectEvidence(Base):
+    __tablename__ = "defect_evidence"
+    __table_args__ = (
+        UniqueConstraint("occurrence_id", name="uq_defect_evidence_occurrence_id"),
+        Index("ix_defect_evidence_issue_id", "issue_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    occurrence_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("defect_occurrence.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    issue_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("evaluation_issue.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("voice_attempt.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transcript_segment_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("transcript_segment.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    quote: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    missing_information: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    correction_rule: Mapped[str] = mapped_column(Text, nullable=False)
+    verification_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class DefectProfile(Base):
+    __tablename__ = "defect_profile"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('observed', 'confirmed', 'high-priority', 'improving', 'stable-improved')",
+            name="ck_defect_profile_state",
+        ),
+        UniqueConstraint("user_id", "defect_code", name="uq_defect_profile_user_code"),
+        Index("ix_defect_profile_user_priority", "user_id", "priority"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    defect_code: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("defect_definition.code", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    frequency: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recurrence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    suspended_occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    scenario_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class AIJob(Base):
     __tablename__ = "ai_job"
     __table_args__ = (
