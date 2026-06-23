@@ -107,7 +107,7 @@ async def client(
     get_settings.cache_clear()
 
 
-async def test_upload_enqueues_transcription_job_and_pending_transcript(
+async def test_upload_creates_pending_transcript_without_transcription_job(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -145,7 +145,7 @@ async def test_upload_enqueues_transcription_job_and_pending_transcript(
         job_count = await session.scalar(
             select(func.count()).select_from(AIJob).where(AIJob.job_type == TRANSCRIBE_ATTEMPT_JOB)
         )
-        assert job_count == 1
+        assert job_count == 0
 
 
 async def test_transcription_retry_does_not_duplicate_segments(

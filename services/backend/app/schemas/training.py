@@ -39,6 +39,35 @@ class AudioUploadResponse(VoiceAttemptResponse):
     pass
 
 
+class TrainingAwaitingInputResponse(BaseModel):
+    type: str
+    stage: AttemptStage
+    round: int
+    text: str
+
+
+class TrainingStateResponse(BaseModel):
+    id: UUID
+    thread_id: str
+    stage: str
+    awaiting: TrainingAwaitingInputResponse | None
+    current_attempt: VoiceAttemptResponse | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+
+class ResumeTrainingRequest(BaseModel):
+    stage: AttemptStage
+    round: int = Field(ge=1, le=3)
+    attempt_id: UUID
+
+
+class ResumeTrainingResponse(BaseModel):
+    job_id: UUID
+    session_stage: str
+
+
 class TranscriptWordResponse(BaseModel):
     text: str
     start_ms: int

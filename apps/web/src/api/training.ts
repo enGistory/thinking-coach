@@ -22,6 +22,29 @@ export interface VoiceAttemptResponse {
   uploaded_at: string | null;
 }
 
+export interface TrainingAwaitingInputResponse {
+  type: string;
+  stage: AttemptStage;
+  round: number;
+  text: string;
+}
+
+export interface TrainingStateResponse {
+  id: string;
+  thread_id: string;
+  stage: string;
+  awaiting: TrainingAwaitingInputResponse | null;
+  current_attempt: VoiceAttemptResponse | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface ResumeTrainingResponse {
+  job_id: string;
+  session_stage: string;
+}
+
 export interface TranscriptWordResponse {
   text: string;
   start_ms: number;
@@ -60,6 +83,8 @@ export async function createCurrentTraining(accessToken: string): Promise<Traini
 export async function createVoiceAttempt(
   accessToken: string,
   sessionId: string,
+  stage: AttemptStage,
+  round: number,
 ): Promise<VoiceAttemptResponse> {
   return requestJson<VoiceAttemptResponse>(`/api/v1/trainings/${sessionId}/attempts`, {
     method: "POST",
@@ -67,7 +92,35 @@ export async function createVoiceAttempt(
       ...authHeaders(accessToken),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ stage: "FIRST", round: 1 }),
+    body: JSON.stringify({ stage, round }),
+  });
+}
+
+export async function fetchTrainingState(
+  accessToken: string,
+  sessionId: string,
+): Promise<TrainingStateResponse> {
+  return requestJson<TrainingStateResponse>(`/api/v1/trainings/${sessionId}/state`, {
+    headers: authHeaders(accessToken),
+  });
+}
+
+export async function resumeTraining(
+  accessToken: string,
+  sessionId: string,
+  attempt: VoiceAttemptResponse,
+): Promise<ResumeTrainingResponse> {
+  return requestJson<ResumeTrainingResponse>(`/api/v1/trainings/${sessionId}/resume`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      stage: attempt.stage,
+      round: attempt.round,
+      attempt_id: attempt.id,
+    }),
   });
 }
 

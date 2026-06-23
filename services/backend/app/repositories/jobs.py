@@ -9,9 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AIJob
 
+GRAPH_RESUME_JOB = "GRAPH_RESUME"
 TRANSCRIBE_ATTEMPT_JOB = "TRANSCRIBE_ATTEMPT"
-TRANSCRIBE_JOB_LEASE_SECONDS = 30 * 60
-TRANSCRIBE_MAX_RETRIES = 2
+AI_JOB_LEASE_SECONDS = 30 * 60
+AI_JOB_MAX_RETRIES = 2
+TRANSCRIBE_JOB_LEASE_SECONDS = AI_JOB_LEASE_SECONDS
+TRANSCRIBE_MAX_RETRIES = AI_JOB_MAX_RETRIES
+
+
+def graph_resume_idempotency_key(
+    *,
+    session_id: UUID,
+    attempt_id: UUID,
+    stage: str,
+    round_number: int,
+) -> str:
+    return f"graph_resume:{session_id}:{stage.lower()}:{round_number}:{attempt_id}"
 
 
 class AIJobRepository:
@@ -31,8 +44,43 @@ class AIJobRepository:
         )
         await self._session.execute(statement)
 
+    async def enqueue_graph_resume(
+        self,
+        *,
+        session_id: UUID,
+        attempt_id: UUID,
+        stage: str,
+        round_number: int,
+    ) -> AIJob:
+        idempotency_key = graph_resume_idempotency_key(
+            session_id=session_id,
+            attempt_id=attempt_id,
+            stage=stage,
+            round_number=round_number,
+        )
+        statement = (
+            insert(AIJob)
+            .values(
+                job_type=GRAPH_RESUME_JOB,
+                payload={
+                    "session_id": str(session_id),
+                    "attempt_id": str(attempt_id),
+                    "stage": stage,
+                    "round": round_number,
+                },
+                status="PENDING",
+                idempotency_key=idempotency_key,
+            )
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        )
+        await self._session.execute(statement)
+        job = await self.get_by_idempotency_key(idempotency_key)
+        if job is None:
+            raise RuntimeError("graph resume job upsert did not return a row")
+        return job
+
     async def claim_next(self, job_type: str) -> AIJob | None:
-        lease_expires_before = datetime.now(UTC) - timedelta(seconds=TRANSCRIBE_JOB_LEASE_SECONDS)
+        lease_expires_before = datetime.now(UTC) - timedelta(seconds=AI_JOB_LEASE_SECONDS)
         result = await self._session.execute(
             select(AIJob)
             .where(
@@ -58,6 +106,12 @@ class AIJobRepository:
         result = await self._session.execute(select(AIJob).where(AIJob.id == job_id))
         return result.scalar_one_or_none()
 
+    async def get_by_idempotency_key(self, idempotency_key: str) -> AIJob | None:
+        result = await self._session.execute(
+            select(AIJob).where(AIJob.idempotency_key == idempotency_key)
+        )
+        return result.scalar_one_or_none()
+
     async def mark_succeeded(self, job: AIJob) -> None:
         job.status = "SUCCEEDED"
         job.error_code = None
@@ -66,7 +120,7 @@ class AIJobRepository:
     async def mark_retryable_failure(self, job: AIJob, error_code: str) -> None:
         job.error_code = error_code
         job.locked_at = None
-        if job.retry_count < TRANSCRIBE_MAX_RETRIES:
+        if job.retry_count < AI_JOB_MAX_RETRIES:
             job.retry_count += 1
             job.status = "PENDING"
         else:

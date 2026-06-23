@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createVoiceAttempt, fetchAttemptTranscript, uploadAttemptAudio } from "./training";
+import {
+  createVoiceAttempt,
+  fetchAttemptTranscript,
+  fetchTrainingState,
+  resumeTraining,
+  uploadAttemptAudio,
+} from "./training";
 
 interface FetchCall {
   input: RequestInfo | URL;
@@ -12,7 +18,7 @@ describe("training API", () => {
     vi.unstubAllGlobals();
   });
 
-  it("creates a first voice attempt with bearer auth", async () => {
+  it("creates a voice attempt for the requested slot with bearer auth", async () => {
     const calls: FetchCall[] = [];
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ input, init });
@@ -33,7 +39,7 @@ describe("training API", () => {
       );
     });
 
-    const response = await createVoiceAttempt("token-1", "session-1");
+    const response = await createVoiceAttempt("token-1", "session-1", "FOLLOWUP", 1);
 
     expect(response.id).toBe("attempt-1");
     expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/attempts");
@@ -41,7 +47,75 @@ describe("training API", () => {
       Authorization: "Bearer token-1",
       "Content-Type": "application/json",
     });
-    expect(calls[0]?.init?.body).toBe(JSON.stringify({ stage: "FIRST", round: 1 }));
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ stage: "FOLLOWUP", round: 1 }));
+  });
+
+  it("fetches training state with bearer auth", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          id: "session-1",
+          thread_id: "session-1",
+          stage: "WAIT_FOLLOWUP_AUDIO",
+          awaiting: {
+            type: "FOLLOWUP_QUESTION",
+            stage: "FOLLOWUP",
+            round: 1,
+            text: "追问文本",
+          },
+          current_attempt: null,
+          created_at: "2026-06-22T00:00:00Z",
+          updated_at: "2026-06-22T00:00:00Z",
+          completed_at: null,
+        }),
+        { status: 200 },
+      );
+    });
+
+    const response = await fetchTrainingState("token-1", "session-1");
+
+    expect(response.awaiting?.stage).toBe("FOLLOWUP");
+    expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/state");
+    expect(calls[0]?.init?.headers).toEqual({ Authorization: "Bearer token-1" });
+  });
+
+  it("resumes a training session with the uploaded attempt slot", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          job_id: "job-1",
+          session_stage: "PROCESS_FIRST",
+        }),
+        { status: 202 },
+      );
+    });
+
+    const response = await resumeTraining("token-1", "session-1", {
+      id: "attempt-1",
+      session_id: "session-1",
+      stage: "FIRST",
+      round: 1,
+      upload_status: "UPLOADED",
+      mime_type: "audio/webm",
+      duration_ms: 1200,
+      size_bytes: 5,
+      checksum_sha256: "a".repeat(64),
+      uploaded_at: "2026-06-22T00:00:00Z",
+    });
+
+    expect(response.job_id).toBe("job-1");
+    expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/resume");
+    expect(calls[0]?.init?.headers).toEqual({
+      Authorization: "Bearer token-1",
+      "Content-Type": "application/json",
+    });
+    expect(calls[0]?.init?.body).toBe(
+      JSON.stringify({ stage: "FIRST", round: 1, attempt_id: "attempt-1" }),
+    );
   });
 
   it("uploads audio as multipart form data", async () => {

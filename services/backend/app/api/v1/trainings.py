@@ -9,11 +9,21 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 
+from app.ai.providers.factory import create_provider_bundle
 from app.api.dependencies import get_current_user
 from app.core.config import Settings, get_settings
 from app.db.models import AppUser, TrainingSession, VoiceAttempt
-from app.db.session import get_session
-from app.repositories.jobs import AIJobRepository
+from app.db.session import get_session, get_sessionmaker
+from app.graphs.voice_training import (
+    DEV_QUESTION_TEXT,
+    FINAL_PROMPT_TEXT,
+    VoiceTrainingDeps,
+    load_voice_training_state,
+)
+from app.repositories.jobs import (
+    AIJobRepository,
+    graph_resume_idempotency_key,
+)
 from app.repositories.training_policy import TrainingPolicyRepository
 from app.repositories.trainings import TrainingRepository
 from app.repositories.transcripts import (
@@ -25,7 +35,11 @@ from app.schemas.training import (
     AttemptTranscriptResponse,
     AudioUploadResponse,
     CreateAttemptRequest,
+    ResumeTrainingRequest,
+    ResumeTrainingResponse,
+    TrainingAwaitingInputResponse,
     TrainingSessionResponse,
+    TrainingStateResponse,
     TranscriptCorrectionRequest,
     TranscriptSegmentResponse,
     TranscriptWordResponse,
@@ -38,6 +52,17 @@ from app.services.audio_storage import (
 )
 
 router = APIRouter(prefix="/api/v1", tags=["trainings"])
+
+WAITING_ATTEMPT_SLOTS = {
+    "WAIT_FIRST_AUDIO": ("FIRST", 1),
+    "WAIT_FOLLOWUP_AUDIO": ("FOLLOWUP", 1),
+    "WAIT_FINAL_AUDIO": ("FINAL", 1),
+}
+PROCESSING_STAGE_BY_ATTEMPT_STAGE = {
+    "FIRST": "PROCESS_FIRST",
+    "FOLLOWUP": "PROCESS_FOLLOWUP",
+    "FINAL": "EVALUATING",
+}
 
 
 @router.post("/trainings/current", response_model=TrainingSessionResponse)
@@ -70,6 +95,7 @@ async def create_voice_attempt(
     )
     if training_session is None:
         raise _not_found()
+    _ensure_attempt_matches_session_stage(training_session, payload)
 
     attempt = await repository.get_or_create_attempt(
         training_session=training_session,
@@ -78,6 +104,88 @@ async def create_voice_attempt(
     )
     await session.commit()
     return _attempt_response(attempt)
+
+
+@router.get("/trainings/{session_id}/state", response_model=TrainingStateResponse)
+async def get_training_state(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TrainingStateResponse:
+    training_session = await TrainingRepository(session).get_owned_session(
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    if training_session is None:
+        raise _not_found()
+
+    graph_state: dict[str, object] = {}
+    if training_session.stage in {"WAIT_FOLLOWUP_AUDIO", "WAIT_FINAL_AUDIO"}:
+        graph_state = dict(
+            await load_voice_training_state(
+                deps=_voice_training_deps(get_settings()),
+                thread_id=training_session.thread_id,
+            )
+        )
+    return await _training_state_response(session, training_session, graph_state)
+
+
+@router.post(
+    "/trainings/{session_id}/resume",
+    response_model=ResumeTrainingResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resume_training(
+    session_id: UUID,
+    payload: ResumeTrainingRequest,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ResumeTrainingResponse:
+    repository = TrainingRepository(session)
+    training_session = await repository.get_owned_session_for_update(
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    if training_session is None:
+        raise _not_found()
+
+    attempt = await repository.get_owned_attempt(
+        attempt_id=payload.attempt_id,
+        user_id=current_user.id,
+    )
+    if attempt is None or attempt.session_id != training_session.id:
+        raise _not_found()
+    if attempt.upload_status != "UPLOADED":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Attempt audio must be uploaded before resume",
+        )
+    if attempt.stage != payload.stage or attempt.round != payload.round:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Resume payload does not match attempt slot",
+        )
+
+    idempotency_key = graph_resume_idempotency_key(
+        session_id=training_session.id,
+        attempt_id=attempt.id,
+        stage=payload.stage,
+        round_number=payload.round,
+    )
+    job_repo = AIJobRepository(session)
+    job = await job_repo.get_by_idempotency_key(idempotency_key)
+    if job is None:
+        _ensure_resume_matches_session_stage(training_session, payload)
+        training_session.stage = PROCESSING_STAGE_BY_ATTEMPT_STAGE[payload.stage]
+        job = await job_repo.enqueue_graph_resume(
+            session_id=training_session.id,
+            attempt_id=attempt.id,
+            stage=payload.stage,
+            round_number=payload.round,
+        )
+
+    await session.commit()
+    return ResumeTrainingResponse(job_id=job.id, session_stage=training_session.stage)
 
 
 @router.put("/attempts/{attempt_id}/audio", response_model=AudioUploadResponse)
@@ -93,7 +201,7 @@ async def upload_attempt_audio(
     attempt = await _get_owned_attempt_for_update(session, attempt_id, current_user.id)
     if attempt.upload_status == "UPLOADED":
         if attempt.checksum_sha256 == checksum_sha256:
-            await _ensure_transcription_job(session, attempt)
+            await _ensure_pending_transcript(session, attempt)
             await session.commit()
             return _audio_upload_response(attempt)
         raise HTTPException(
@@ -131,7 +239,7 @@ async def upload_attempt_audio(
         days=await _retention_days(session, current_user.id, settings)
     )
     attempt.uploaded_at = datetime.now(UTC)
-    await _ensure_transcription_job(session, attempt)
+    await _ensure_pending_transcript(session, attempt)
     await session.commit()
     return _audio_upload_response(attempt)
 
@@ -240,9 +348,111 @@ async def _retention_days(session: AsyncSession, user_id: UUID, settings: Settin
     return policy.retention_days
 
 
-async def _ensure_transcription_job(session: AsyncSession, attempt: VoiceAttempt) -> None:
+async def _ensure_pending_transcript(session: AsyncSession, attempt: VoiceAttempt) -> None:
     await TranscriptRepository(session).ensure_pending(attempt.id)
-    await AIJobRepository(session).enqueue_transcribe_attempt(attempt.id)
+
+
+def _ensure_attempt_matches_session_stage(
+    training_session: TrainingSession,
+    payload: CreateAttemptRequest,
+) -> None:
+    expected = WAITING_ATTEMPT_SLOTS.get(training_session.stage)
+    if expected != (payload.stage, payload.round):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Attempt slot is not open for the current session stage",
+        )
+
+
+def _ensure_resume_matches_session_stage(
+    training_session: TrainingSession,
+    payload: ResumeTrainingRequest,
+) -> None:
+    expected = WAITING_ATTEMPT_SLOTS.get(training_session.stage)
+    if expected != (payload.stage, payload.round):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Resume slot is not open for the current session stage",
+        )
+
+
+def _voice_training_deps(settings: Settings) -> VoiceTrainingDeps:
+    bundle = create_provider_bundle(settings)
+    return VoiceTrainingDeps(
+        settings=settings,
+        sessionmaker=get_sessionmaker(),
+        llm_provider=bundle.llm,
+        stt_provider=bundle.stt,
+    )
+
+
+async def _training_state_response(
+    session: AsyncSession,
+    training_session: TrainingSession,
+    graph_state: dict[str, object],
+) -> TrainingStateResponse:
+    return TrainingStateResponse(
+        id=training_session.id,
+        thread_id=training_session.thread_id,
+        stage=training_session.stage,
+        awaiting=_awaiting_input_response(training_session.stage, graph_state),
+        current_attempt=await _current_attempt_response(session, training_session),
+        created_at=training_session.created_at,
+        updated_at=training_session.updated_at,
+        completed_at=training_session.completed_at,
+    )
+
+
+def _awaiting_input_response(
+    session_stage: str,
+    graph_state: dict[str, object],
+) -> TrainingAwaitingInputResponse | None:
+    if session_stage == "WAIT_FIRST_AUDIO":
+        return TrainingAwaitingInputResponse(
+            type="FIRST_ANSWER",
+            stage="FIRST",
+            round=1,
+            text=DEV_QUESTION_TEXT,
+        )
+    if session_stage == "WAIT_FOLLOWUP_AUDIO":
+        followup_text = graph_state.get("followup_text")
+        return TrainingAwaitingInputResponse(
+            type="FOLLOWUP_QUESTION",
+            stage="FOLLOWUP",
+            round=1,
+            text=(
+                followup_text
+                if isinstance(followup_text, str) and followup_text
+                else "请补充你刚才判断中最关键的依据、未知和取舍。"
+            ),
+        )
+    if session_stage == "WAIT_FINAL_AUDIO":
+        final_text = graph_state.get("final_prompt_text")
+        return TrainingAwaitingInputResponse(
+            type="FINAL_ANSWER",
+            stage="FINAL",
+            round=1,
+            text=final_text if isinstance(final_text, str) and final_text else FINAL_PROMPT_TEXT,
+        )
+    return None
+
+
+async def _current_attempt_response(
+    session: AsyncSession,
+    training_session: TrainingSession,
+) -> VoiceAttemptResponse | None:
+    expected = WAITING_ATTEMPT_SLOTS.get(training_session.stage)
+    if expected is None:
+        return None
+    stage, round_number = expected
+    attempt = await TrainingRepository(session).get_attempt_by_slot(
+        session_id=training_session.id,
+        stage=stage,
+        round_number=round_number,
+    )
+    if attempt is None:
+        return None
+    return _attempt_response(attempt)
 
 
 def _training_session_response(training_session: TrainingSession) -> TrainingSessionResponse:

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import exists, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import TrainingSession, VoiceAttempt
+
+TERMINAL_SESSION_STAGES = ("COMPLETED", "EXPIRED", "ABANDONED", "INVALID", "FAILED_RETRYABLE")
 
 
 class TrainingRepository:
@@ -14,8 +16,8 @@ class TrainingRepository:
         self._session = session
 
     async def get_or_create_current_audio_session(self, user_id: UUID) -> TrainingSession:
-        latest = await self._latest_waiting_first_audio_session(user_id)
-        if latest is not None and not await self._has_uploaded_first_attempt(latest.id):
+        latest = await self._latest_active_audio_session(user_id)
+        if latest is not None:
             return latest
 
         session_id = uuid4()
@@ -40,6 +42,22 @@ class TrainingRepository:
                 TrainingSession.id == session_id,
                 TrainingSession.user_id == user_id,
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_owned_session_for_update(
+        self,
+        *,
+        session_id: UUID,
+        user_id: UUID,
+    ) -> TrainingSession | None:
+        result = await self._session.execute(
+            select(TrainingSession)
+            .where(
+                TrainingSession.id == session_id,
+                TrainingSession.user_id == user_id,
+            )
+            .with_for_update(of=TrainingSession)
         )
         return result.scalar_one_or_none()
 
@@ -127,31 +145,31 @@ class TrainingRepository:
             return None
         return row[0], row[1]
 
-    async def _latest_waiting_first_audio_session(self, user_id: UUID) -> TrainingSession | None:
+    async def get_attempt_by_slot(
+        self,
+        *,
+        session_id: UUID,
+        stage: str,
+        round_number: int,
+    ) -> VoiceAttempt | None:
+        return await self._get_attempt_by_slot(
+            session_id,
+            stage=stage,
+            round_number=round_number,
+        )
+
+    async def _latest_active_audio_session(self, user_id: UUID) -> TrainingSession | None:
         result = await self._session.execute(
             select(TrainingSession)
             .where(
                 TrainingSession.user_id == user_id,
-                TrainingSession.stage == "WAIT_FIRST_AUDIO",
+                TrainingSession.stage.not_in(TERMINAL_SESSION_STAGES),
                 TrainingSession.question_id.is_(None),
             )
             .order_by(TrainingSession.created_at.desc())
             .limit(1)
         )
         return result.scalar_one_or_none()
-
-    async def _has_uploaded_first_attempt(self, session_id: UUID) -> bool:
-        result = await self._session.execute(
-            select(
-                exists().where(
-                    VoiceAttempt.session_id == session_id,
-                    VoiceAttempt.stage == "FIRST",
-                    VoiceAttempt.round == 1,
-                    VoiceAttempt.upload_status == "UPLOADED",
-                )
-            )
-        )
-        return bool(result.scalar_one())
 
     async def _get_attempt_by_slot(
         self,

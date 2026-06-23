@@ -7,10 +7,13 @@ import {
   createVoiceAttempt,
   fetchAttemptAudio,
   fetchAttemptTranscript,
+  fetchTrainingState,
+  resumeTraining,
   uploadAttemptAudio,
   type AttemptTranscriptResponse,
   type TranscriptSegmentResponse,
   type TrainingSessionResponse,
+  type TrainingStateResponse,
   type VoiceAttemptResponse,
 } from "../api/training";
 import { sha256Hex } from "../audio/checksum";
@@ -31,6 +34,7 @@ import {
   deletePendingAudioBestEffort,
   type PendingAudioRecord,
 } from "../audio/pendingAudioStore";
+import { shouldContinueTrainingStatePolling, syncTrainingStatePolling } from "../trainingFlow";
 
 type RecorderState = "idle" | "recording" | "uploading" | "pending" | "uploaded";
 
@@ -41,6 +45,7 @@ const nickname = ref("");
 const password = ref("");
 const accessToken = ref(readSessionValue(ACCESS_TOKEN_KEY));
 const trainingSession = ref<TrainingSessionResponse | null>(null);
+const trainingState = ref<TrainingStateResponse | null>(null);
 const attempt = ref<VoiceAttemptResponse | null>(null);
 const recorderState = ref<RecorderState>("idle");
 const statusMessage = ref("等待登录");
@@ -52,8 +57,9 @@ const pendingAttemptId = ref(readLocalValue(PENDING_ATTEMPT_KEY));
 const playbackAudio = ref<SeekablePlayback | null>(null);
 
 const isAuthenticated = computed(() => accessToken.value.length > 0);
+const awaitingInput = computed(() => trainingState.value?.awaiting ?? null);
 const canStartRecording = computed(
-  () => isAuthenticated.value && recorderState.value === "idle" && attempt.value?.upload_status !== "UPLOADED",
+  () => isAuthenticated.value && recorderState.value === "idle" && awaitingInput.value !== null,
 );
 const hasPendingUpload = computed(() => recorderState.value === "pending" && pendingAttemptId.value.length > 0);
 
@@ -64,18 +70,20 @@ let recordingStartedAt = 0;
 let countdownTimer: number | undefined;
 let autoStopTimer: number | undefined;
 let transcriptPollTimer: number | undefined;
+let trainingStatePollTimer: number | undefined;
 let inMemoryPendingRecord: PendingAudioRecord | null = null;
 
 onMounted(() => {
   if (isAuthenticated.value) {
     statusMessage.value = "已恢复登录状态";
-    void restorePendingUpload();
+    void restoreTrainingFlow();
   }
 });
 
 onBeforeUnmount(() => {
   clearRecordingTimers();
   stopTranscriptPolling();
+  stopTrainingStatePolling();
   stopMediaTracks();
   revokePlaybackUrl();
 });
@@ -90,8 +98,7 @@ async function submitLogin() {
     accessToken.value = tokens.access_token;
     writeSessionValue(ACCESS_TOKEN_KEY, tokens.access_token);
     statusMessage.value = "登录成功";
-    await ensureTrainingSession();
-    await restorePendingUpload();
+    await restoreTrainingFlow();
   } catch (error) {
     errorMessage.value = errorToMessage(error, "登录失败");
   }
@@ -105,20 +112,59 @@ async function ensureTrainingSession(): Promise<TrainingSessionResponse> {
     return trainingSession.value;
   }
   trainingSession.value = await createCurrentTraining(accessToken.value);
-  statusMessage.value = "录音会话已就绪";
   return trainingSession.value;
 }
 
-async function ensureFirstAttempt(): Promise<VoiceAttemptResponse> {
+async function refreshTrainingState(): Promise<TrainingStateResponse> {
   if (!accessToken.value) {
     throw new Error("请先登录");
   }
-  if (attempt.value !== null) {
+  const session = await ensureTrainingSession();
+  trainingState.value = await fetchTrainingState(accessToken.value, session.id);
+  attempt.value = trainingState.value.current_attempt;
+  if (trainingState.value.stage === "COMPLETED") {
+    statusMessage.value = "本轮答辩已完成";
+    recorderState.value = "uploaded";
+  } else if (trainingState.value.awaiting !== null && recorderState.value !== "pending") {
+    statusMessage.value = stageStatusText(trainingState.value.awaiting.stage);
+    recorderState.value = "idle";
+  } else if (trainingState.value.awaiting === null && recorderState.value !== "pending") {
+    statusMessage.value = "处理中";
+  }
+  syncTrainingStatePolling(trainingState.value, {
+    start: startTrainingStatePolling,
+    stop: stopTrainingStatePolling,
+  });
+  return trainingState.value;
+}
+
+async function ensureCurrentAttempt(): Promise<VoiceAttemptResponse> {
+  if (!accessToken.value) {
+    throw new Error("请先登录");
+  }
+  const state = trainingState.value ?? (await refreshTrainingState());
+  if (state.awaiting === null) {
+    throw new Error("当前没有等待录音的阶段");
+  }
+  if (
+    attempt.value !== null &&
+    attempt.value.stage === state.awaiting.stage &&
+    attempt.value.round === state.awaiting.round
+  ) {
     return attempt.value;
   }
-  const session = await ensureTrainingSession();
-  attempt.value = await createVoiceAttempt(accessToken.value, session.id);
+  attempt.value = await createVoiceAttempt(
+    accessToken.value,
+    state.id,
+    state.awaiting.stage,
+    state.awaiting.round,
+  );
   return attempt.value;
+}
+
+async function restoreTrainingFlow() {
+  await refreshTrainingState();
+  await restorePendingUpload();
 }
 
 async function startRecording() {
@@ -128,7 +174,7 @@ async function startRecording() {
     return;
   }
   if (hasPendingUpload.value) {
-    errorMessage.value = "请先上传已缓存的第一答";
+    errorMessage.value = "请先上传已缓存的录音";
     return;
   }
 
@@ -140,7 +186,7 @@ async function startRecording() {
 
   try {
     const stream = await globalThis.navigator.mediaDevices.getUserMedia({ audio: true });
-    const currentAttempt = await ensureFirstAttempt();
+    const currentAttempt = await ensureCurrentAttempt();
     mediaStream = stream;
     chunks = [];
     mediaRecorder = new MediaRecorder(stream, buildRecorderOptions(selectedMimeType));
@@ -255,11 +301,13 @@ async function uploadPendingRecord(record: PendingAudioRecord) {
     record.checksumSha256,
   );
   attempt.value = uploaded;
+  await resumeTraining(accessToken.value, uploaded.session_id, uploaded);
   await forgetPendingRecord(record.attemptId);
   recorderState.value = "uploaded";
-  statusMessage.value = "上传成功";
+  statusMessage.value = "上传成功，处理中";
   await loadPlayback(record.attemptId);
   startTranscriptPolling(record.attemptId);
+  await refreshTrainingState();
 }
 
 async function loadPlayback(attemptId: string) {
@@ -274,13 +322,15 @@ async function loadPlayback(attemptId: string) {
 async function startNextRecording() {
   clearMessages();
   stopTranscriptPolling();
+  stopTrainingStatePolling();
   revokePlaybackUrl();
   trainingSession.value = null;
+  trainingState.value = null;
   attempt.value = null;
   transcript.value = null;
   recorderState.value = "idle";
   statusMessage.value = "可开始下一条录音";
-  await ensureTrainingSession();
+  await refreshTrainingState();
 }
 
 async function restorePendingUpload() {
@@ -347,6 +397,28 @@ function startTranscriptPolling(attemptId: string) {
   }, 2000);
 }
 
+function startTrainingStatePolling() {
+  if (trainingStatePollTimer !== undefined) {
+    return;
+  }
+  trainingStatePollTimer = globalThis.setInterval(() => {
+    void pollTrainingState();
+  }, 2000);
+}
+
+async function pollTrainingState() {
+  if (!accessToken.value) {
+    return;
+  }
+  try {
+    await refreshTrainingState();
+  } catch (error) {
+    if (trainingState.value?.awaiting === null || recorderState.value === "uploaded") {
+      errorMessage.value = errorToMessage(error, "读取训练状态失败");
+    }
+  }
+}
+
 async function pollTranscript(attemptId: string) {
   if (!accessToken.value) {
     return;
@@ -354,7 +426,10 @@ async function pollTranscript(attemptId: string) {
   try {
     transcript.value = await fetchAttemptTranscript(accessToken.value, attemptId);
     if (transcript.value.status === "SUCCEEDED" || transcript.value.status === "FAILED") {
-      stopTranscriptPolling();
+      const state = await refreshTrainingState();
+      if (!shouldContinueTrainingStatePolling(state)) {
+        stopTranscriptPolling();
+      }
     }
   } catch (error) {
     if (recorderState.value === "uploaded") {
@@ -367,6 +442,13 @@ function stopTranscriptPolling() {
   if (transcriptPollTimer !== undefined) {
     globalThis.clearInterval(transcriptPollTimer);
     transcriptPollTimer = undefined;
+  }
+}
+
+function stopTrainingStatePolling() {
+  if (trainingStatePollTimer !== undefined) {
+    globalThis.clearInterval(trainingStatePollTimer);
+    trainingStatePollTimer = undefined;
   }
 }
 
@@ -399,6 +481,19 @@ function errorToMessage(error: unknown, fallback: string): string {
     return error.message;
   }
   return fallback;
+}
+
+function stageStatusText(stage: string): string {
+  if (stage === "FIRST") {
+    return "等待第一答";
+  }
+  if (stage === "FOLLOWUP") {
+    return "等待追问回答";
+  }
+  if (stage === "FINAL") {
+    return "等待最终答";
+  }
+  return "等待录音";
 }
 
 function readSessionValue(key: string): string {
@@ -449,7 +544,7 @@ function removeLocalValue(key: string) {
       aria-labelledby="app-title"
     >
       <p class="eyebrow">
-        P03 语音切片
+        P05 语音答辩
       </p>
       <h1 id="app-title">
         Thinking Coach
@@ -493,6 +588,15 @@ function removeLocalValue(key: string) {
           </strong>
         </div>
 
+        <section
+          v-if="awaitingInput"
+          class="prompt-box"
+          aria-label="当前题目"
+        >
+          <span>{{ awaitingInput.stage }}</span>
+          <p>{{ awaitingInput.text }}</p>
+        </section>
+
         <div class="controls">
           <button
             v-if="recorderState !== 'recording'"
@@ -517,7 +621,7 @@ function removeLocalValue(key: string) {
             重试上传
           </button>
           <button
-            :disabled="recorderState !== 'uploaded'"
+            :disabled="trainingState?.stage !== 'COMPLETED'"
             type="button"
             @click="startNextRecording"
           >
