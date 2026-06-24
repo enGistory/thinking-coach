@@ -134,6 +134,9 @@ class AIJobRepository:
             raise RuntimeError("question preparation job upsert did not return a row")
         return new_job
 
+    async def get_prepare_questions_job(self, *, user_id: UUID) -> AIJob | None:
+        return await self.get_by_idempotency_key(prepare_questions_idempotency_key(user_id))
+
     async def _insert_prepare_questions_job(self, *, user_id: UUID, idempotency_key: str) -> None:
         statement = (
             insert(AIJob)

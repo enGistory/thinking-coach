@@ -249,16 +249,20 @@ def _mock_payload_for_schema(
                         }
                     ],
                     "fingerprint": {
-                        "domain": "project",
-                        "role": "manager",
+                        "domain": f"project-{chr(97 + index)}",
+                        "role": f"manager-{chr(97 + index)}",
+                        "conflict": f"tradeoff-{chr(97 + index)}",
+                        "constraint": f"constraint-{chr(97 + index)}",
+                        "time_span": f"phase-{chr(97 + index)}",
                         "decision_object": scenario,
-                        "template_family": "mock-p08",
+                        "reasoning_skeleton": f"skeleton-{chr(97 + index)}",
+                        "template_family": f"mock-p08-{index}",
                     },
                     "expected_reasoning": ["区分事实、假设和未知"],
                     "prohibited_inferences": ["不得补充来源未支持的因果"],
                     "hypothetical_assumptions": [],
                 }
-                for scenario in scenarios
+                for index, scenario in enumerate(scenarios)
             ]
         }
     if name == "RubricGenerationResult":
@@ -273,6 +277,13 @@ def _mock_payload_for_schema(
             },
             "expected_elements": ["结论", "事实", "假设", "未知", "取舍", "下一步"],
             "fatal_omissions": ["答非所问", "把假设当事实"],
+        }
+    if name == "DedupeAdjudicationResult":
+        return {
+            "is_duplicate": False,
+            "duplicate_type": "other",
+            "reusable_answer_skeleton": False,
+            "reason": "mock adjudication passes the candidate",
         }
     return {"ok": True, "message": "mock structured response"}
 

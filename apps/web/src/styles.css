@@ -39,7 +39,9 @@ button:disabled {
   cursor: not-allowed;
 }
 
-input {
+input,
+select,
+textarea {
   min-height: 44px;
   width: 100%;
   border: 1px solid #b6c2ca;
@@ -47,6 +49,12 @@ input {
   padding: 0 12px;
   background: #ffffff;
   color: #172026;
+}
+
+textarea {
+  min-height: 96px;
+  padding: 10px 12px;
+  resize: vertical;
 }
 
 .shell {
@@ -316,6 +324,31 @@ h1 {
 
 .source-list li span {
   display: block;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-form {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #e4eaee;
+  padding-top: 12px;
+}
+
+.duplicate-form label {
+  display: grid;
+  gap: 6px;
+  color: #4b5b65;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.inline-status {
+  margin: 0;
+  border: 1px solid #b7dfd7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f0fdfa;
+  color: #0f5f59;
   overflow-wrap: anywhere;
 }
 

@@ -4,10 +4,20 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 SourceLevel = Literal["S", "A", "B", "C"]
 SupportStatus = Literal["VERIFIED", "CONFLICTED", "UNSUPPORTED"]
+DuplicateType = Literal[
+    "text",
+    "semantic",
+    "parameter",
+    "role",
+    "structure",
+    "answer_skeleton",
+    "same_event",
+    "other",
+]
 
 
 class SearchDirectionPlan(BaseModel):
@@ -71,6 +81,13 @@ class RubricGenerationResult(BaseModel):
     fatal_omissions: list[str] = Field(default_factory=list)
 
 
+class DedupeAdjudicationResult(BaseModel):
+    is_duplicate: bool
+    duplicate_type: DuplicateType = "other"
+    reusable_answer_skeleton: bool = False
+    reason: str = Field(min_length=1, max_length=2000)
+
+
 class SourceSummaryResponse(BaseModel):
     source_count: int
     highest_source_level: SourceLevel | None
@@ -111,3 +128,27 @@ class TrainingProvenanceResponse(BaseModel):
     sources: list[ProvenanceSourceResponse]
     mappings: list[ProvenanceMappingResponse]
     hypothetical_assumptions: list[str]
+
+
+class DuplicateComplaintRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+    similar_question_id: UUID | None = None
+    duplicate_type: DuplicateType = "other"
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("reason must not be blank")
+        return stripped
+
+
+class DuplicateComplaintResponse(BaseModel):
+    id: UUID
+    session_id: UUID
+    question_id: UUID
+    template_family: str
+    status: Literal["ACCEPTED"]
+    replacement_job_id: UUID
+    created_at: datetime

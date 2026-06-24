@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createDuplicateComplaint,
   createVoiceAttempt,
   fetchAttemptTranscript,
   fetchTrainingProvenance,
@@ -136,6 +137,43 @@ describe("training API", () => {
     expect(response.sources[0]?.claims[0]?.support_status).toBe("VERIFIED");
     expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/provenance");
     expect(calls[0]?.init?.headers).toEqual({ Authorization: "Bearer token-1" });
+  });
+
+  it("submits a duplicate complaint with reason and type", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          id: "complaint-1",
+          session_id: "session-1",
+          question_id: "question-1",
+          template_family: "family-1",
+          status: "ACCEPTED",
+          replacement_job_id: "job-1",
+          created_at: "2026-06-24T00:00:00Z",
+        }),
+        { status: 201 },
+      );
+    });
+
+    const response = await createDuplicateComplaint("token-1", "session-1", {
+      reason: "same answer skeleton",
+      duplicate_type: "answer_skeleton",
+    });
+
+    expect(response.replacement_job_id).toBe("job-1");
+    expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/duplicate-complaints");
+    expect(calls[0]?.init?.headers).toEqual({
+      Authorization: "Bearer token-1",
+      "Content-Type": "application/json",
+    });
+    expect(calls[0]?.init?.body).toBe(
+      JSON.stringify({
+        reason: "same answer skeleton",
+        duplicate_type: "answer_skeleton",
+      }),
+    );
   });
 
   it("resumes a training session with the uploaded attempt slot", async () => {

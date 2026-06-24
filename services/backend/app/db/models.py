@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
+from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -306,10 +308,7 @@ class QuestionClaimMap(Base):
 
 class QuestionFingerprint(Base):
     __tablename__ = "question_fingerprint"
-    __table_args__ = (
-        UniqueConstraint("question_id", name="uq_question_fingerprint_question_id"),
-        UniqueConstraint("normalized_hash", name="uq_question_fingerprint_normalized_hash"),
-    )
+    __table_args__ = (UniqueConstraint("question_id", name="uq_question_fingerprint_question_id"),)
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     question_id: Mapped[UUID] = mapped_column(
@@ -321,6 +320,145 @@ class QuestionFingerprint(Base):
     structural_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     template_family: Mapped[str] = mapped_column(String(128), nullable=False, default="p08")
     source_event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
+    summary_embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
+    decision_embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
+    answer_skeleton_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dedupe_decision_json: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class QuestionDedupeCheck(Base):
+    __tablename__ = "question_dedupe_check"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('PASS', 'REJECT')",
+            name="ck_question_dedupe_check_decision",
+        ),
+        Index("ix_question_dedupe_check_user_created", "user_id", "created_at"),
+        Index("ix_question_dedupe_check_question_id", "question_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_bundle_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("source_bundle.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    question_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    candidate_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    template_family: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    rejection_level: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    max_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    structure_change_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    matched_question_ids_json: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    input_summary_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    decision_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class QuestionTemplateDenylist(Base):
+    __tablename__ = "question_template_denylist"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "template_family",
+            name="uq_question_template_deny_user_family",
+        ),
+        Index("ix_question_template_deny_user", "user_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    template_family: Mapped[str] = mapped_column(String(128), nullable=False)
+    trigger_question_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class QuestionDuplicateComplaint(Base):
+    __tablename__ = "question_duplicate_complaint"
+    __table_args__ = (
+        CheckConstraint(
+            "duplicate_type IN ("
+            "'text', 'semantic', 'parameter', 'role', 'structure', "
+            "'answer_skeleton', 'same_event', 'other'"
+            ")",
+            name="ck_question_duplicate_complaint_type",
+        ),
+        CheckConstraint(
+            "status IN ('ACCEPTED')",
+            name="ck_question_duplicate_complaint_status",
+        ),
+        UniqueConstraint("user_id", "session_id", name="uq_question_duplicate_complaint_session"),
+        Index("ix_question_duplicate_complaint_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("training_session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    question_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    similar_question_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    duplicate_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    template_family: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACCEPTED")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

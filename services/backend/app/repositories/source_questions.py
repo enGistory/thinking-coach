@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -12,17 +13,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.providers.contracts import ProviderCallMetadata
 from app.db.models import (
     DefectProfile,
+    EvaluationReport,
     ModelRun,
     PromptVersion,
     Question,
     QuestionClaimMap,
+    QuestionDedupeCheck,
+    QuestionDuplicateComplaint,
     QuestionFingerprint,
     QuestionRubric,
     QuestionSource,
+    QuestionTemplateDenylist,
     SourceBundle,
     SourceClaim,
     TrainingSession,
 )
+from app.domain.question_dedupe import HistoricalQuestion
 from app.domain.source_question import BOOTSTRAP_DEFECTS, SourceLevel, highest_source_level
 
 
@@ -61,6 +67,11 @@ class QuestionWrite:
     structural_json: dict[str, object]
     template_family: str
     source_event_id: str | None
+    prompt_embedding: list[float]
+    summary_embedding: list[float]
+    decision_embedding: list[float]
+    answer_skeleton_hash: str
+    dedupe_decision_json: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,24 @@ class RubricWrite:
 
 
 @dataclass(frozen=True)
+class DedupeCheckWrite:
+    user_id: UUID
+    source_bundle_id: UUID | None
+    question_id: UUID | None
+    candidate_hash: str
+    normalized_hash: str
+    template_family: str
+    source_event_id: str | None
+    decision: str
+    rejection_level: str | None
+    max_similarity: float | None
+    structure_change_count: int | None
+    matched_question_ids: list[str]
+    input_summary_json: dict[str, object]
+    decision_json: dict[str, object]
+
+
+@dataclass(frozen=True)
 class ProvenanceBundle:
     training_session: TrainingSession
     question: Question
@@ -88,6 +117,14 @@ class ProvenanceBundle:
     sources: list[QuestionSource]
     claims_by_source: dict[UUID, list[SourceClaim]]
     mappings: list[QuestionClaimMap]
+
+
+@dataclass(frozen=True)
+class DuplicateComplaintTarget:
+    training_session: TrainingSession
+    question: Question
+    fingerprint: QuestionFingerprint
+    existing_complaint: QuestionDuplicateComplaint | None
 
 
 class SourceQuestionRepository:
@@ -103,6 +140,18 @@ class SourceQuestionRepository:
         )
         defects = [str(code) for code in result.scalars().all()]
         return defects or list(BOOTSTRAP_DEFECTS)
+
+    async def target_requires_high_variation(self, *, user_id: UUID, defects: list[str]) -> bool:
+        if not defects:
+            return False
+        result = await self._session.execute(
+            select(DefectProfile.id).where(
+                DefectProfile.user_id == user_id,
+                DefectProfile.defect_code.in_(defects),
+                DefectProfile.state == "high-priority",
+            )
+        )
+        return result.scalar_one_or_none() is not None
 
     async def ensure_source_bundle(
         self,
@@ -212,13 +261,70 @@ class SourceQuestionRepository:
         bundle.status = "READY" if sources else "INVALID"
         await self._session.flush()
 
-    async def normalized_hash_exists(self, normalized_hash: str) -> bool:
+    async def normalized_hash_exists(self, *, user_id: UUID, normalized_hash: str) -> bool:
         result = await self._session.execute(
-            select(QuestionFingerprint.id).where(
-                QuestionFingerprint.normalized_hash == normalized_hash
+            select(QuestionFingerprint.id)
+            .join(Question, QuestionFingerprint.question_id == Question.id)
+            .where(
+                Question.user_id == user_id,
+                QuestionFingerprint.normalized_hash == normalized_hash,
             )
         )
         return result.scalar_one_or_none() is not None
+
+    async def template_family_denied(self, *, user_id: UUID, template_family: str) -> bool:
+        result = await self._session.execute(
+            select(QuestionTemplateDenylist.id).where(
+                QuestionTemplateDenylist.user_id == user_id,
+                QuestionTemplateDenylist.template_family == template_family,
+            )
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def list_historical_questions(self, *, user_id: UUID) -> list[HistoricalQuestion]:
+        result = await self._session.execute(
+            select(Question, QuestionFingerprint)
+            .join(QuestionFingerprint, QuestionFingerprint.question_id == Question.id)
+            .where(Question.user_id == user_id)
+            .order_by(Question.created_at, Question.id)
+        )
+        return [
+            HistoricalQuestion(
+                question_id=str(question.id),
+                prompt=question.prompt,
+                normalized_hash=fingerprint.normalized_hash,
+                template_family=fingerprint.template_family,
+                target_defects=tuple(question.target_defects),
+                structural_json=fingerprint.structural_json,
+                source_event_id=fingerprint.source_event_id,
+                prompt_embedding=_vector_list(fingerprint.prompt_embedding),
+                summary_embedding=_vector_list(fingerprint.summary_embedding),
+                decision_embedding=_vector_list(fingerprint.decision_embedding),
+                answer_skeleton_hash=fingerprint.answer_skeleton_hash,
+            )
+            for question, fingerprint in result.all()
+        ]
+
+    async def record_dedupe_check(self, check: DedupeCheckWrite) -> QuestionDedupeCheck:
+        row = QuestionDedupeCheck(
+            user_id=check.user_id,
+            source_bundle_id=check.source_bundle_id,
+            question_id=check.question_id,
+            candidate_hash=check.candidate_hash,
+            normalized_hash=check.normalized_hash,
+            template_family=check.template_family,
+            source_event_id=check.source_event_id,
+            decision=check.decision,
+            rejection_level=check.rejection_level,
+            max_similarity=check.max_similarity,
+            structure_change_count=check.structure_change_count,
+            matched_question_ids_json=check.matched_question_ids,
+            input_summary_json=check.input_summary_json,
+            decision_json=check.decision_json,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
 
     async def create_ready_question(
         self,
@@ -229,7 +335,10 @@ class SourceQuestionRepository:
         mappings: list[ClaimMappingWrite],
         rubric: RubricWrite,
     ) -> Question | None:
-        if await self.normalized_hash_exists(question.normalized_hash):
+        if await self.normalized_hash_exists(
+            user_id=user_id,
+            normalized_hash=question.normalized_hash,
+        ):
             return None
         row = Question(
             user_id=user_id,
@@ -255,6 +364,11 @@ class SourceQuestionRepository:
                 structural_json=question.structural_json,
                 template_family=question.template_family,
                 source_event_id=question.source_event_id,
+                prompt_embedding=question.prompt_embedding,
+                summary_embedding=question.summary_embedding,
+                decision_embedding=question.decision_embedding,
+                answer_skeleton_hash=question.answer_skeleton_hash,
+                dedupe_decision_json=question.dedupe_decision_json,
             )
         )
         self._session.add_all(
@@ -284,18 +398,29 @@ class SourceQuestionRepository:
         return row
 
     async def claim_ready_question_for_user(self, user_id: UUID) -> Question | None:
-        result = await self._session.execute(
-            select(Question)
-            .where(
-                Question.user_id == user_id,
-                Question.status == "READY",
-                Question.exposed_count == 0,
+        while True:
+            result = await self._session.execute(
+                select(Question)
+                .where(
+                    Question.user_id == user_id,
+                    Question.status == "READY",
+                    Question.exposed_count == 0,
+                )
+                .order_by(Question.ready_at, Question.created_at)
+                .with_for_update(skip_locked=True)
+                .limit(1)
             )
-            .order_by(Question.ready_at, Question.created_at)
-            .with_for_update(skip_locked=True)
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
+            question = result.scalar_one_or_none()
+            if question is None:
+                return None
+            template_family = await self._template_family_for_question(question.id)
+            if template_family is None or not await self.template_family_denied(
+                user_id=user_id,
+                template_family=template_family,
+            ):
+                return question
+            question.status = "INVALID"
+            await self._session.flush()
 
     async def mark_question_exposed(self, question: Question) -> None:
         question.status = "EXPOSED"
@@ -303,8 +428,23 @@ class SourceQuestionRepository:
         question.exposed_at = datetime.now(UTC)
         await self._session.flush()
 
+    async def _template_family_for_question(self, question_id: UUID) -> str | None:
+        result = await self._session.execute(
+            select(QuestionFingerprint.template_family).where(
+                QuestionFingerprint.question_id == question_id
+            )
+        )
+        value = result.scalar_one_or_none()
+        return str(value) if value is not None else None
+
     async def get_question(self, question_id: UUID) -> Question | None:
         return await self._session.get(Question, question_id)
+
+    async def get_fingerprint(self, question_id: UUID) -> QuestionFingerprint | None:
+        result = await self._session.execute(
+            select(QuestionFingerprint).where(QuestionFingerprint.question_id == question_id)
+        )
+        return result.scalar_one_or_none()
 
     async def get_source_bundle_for_question(self, question_id: UUID) -> SourceBundle | None:
         result = await self._session.execute(
@@ -380,6 +520,151 @@ class SourceQuestionRepository:
             mappings=mappings,
         )
 
+    async def get_duplicate_complaint_target(
+        self,
+        *,
+        user_id: UUID,
+        session_id: UUID,
+    ) -> DuplicateComplaintTarget | None:
+        result = await self._session.execute(
+            select(
+                TrainingSession,
+                Question,
+                QuestionFingerprint,
+                QuestionDuplicateComplaint,
+            )
+            .join(Question, TrainingSession.question_id == Question.id)
+            .join(QuestionFingerprint, QuestionFingerprint.question_id == Question.id)
+            .outerjoin(
+                QuestionDuplicateComplaint,
+                QuestionDuplicateComplaint.session_id == TrainingSession.id,
+            )
+            .where(
+                TrainingSession.user_id == user_id,
+                TrainingSession.id == session_id,
+                TrainingSession.stage == "COMPLETED",
+            )
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        training_session, question, fingerprint, complaint = row
+        return DuplicateComplaintTarget(
+            training_session=training_session,
+            question=question,
+            fingerprint=fingerprint,
+            existing_complaint=complaint,
+        )
+
+    async def ensure_template_denylist(
+        self,
+        *,
+        user_id: UUID,
+        template_family: str,
+        trigger_question_id: UUID,
+        reason: str,
+    ) -> QuestionTemplateDenylist:
+        await self._session.execute(
+            insert(QuestionTemplateDenylist)
+            .values(
+                user_id=user_id,
+                template_family=template_family,
+                trigger_question_id=trigger_question_id,
+                reason=reason,
+            )
+            .on_conflict_do_nothing(index_elements=["user_id", "template_family"])
+        )
+        result = await self._session.execute(
+            select(QuestionTemplateDenylist).where(
+                QuestionTemplateDenylist.user_id == user_id,
+                QuestionTemplateDenylist.template_family == template_family,
+            )
+        )
+        deny = result.scalar_one_or_none()
+        if deny is None:
+            raise RuntimeError("template denylist upsert did not return a row")
+        await self.invalidate_ready_questions_for_template(
+            user_id=user_id,
+            template_family=template_family,
+        )
+        return deny
+
+    async def create_duplicate_complaint(
+        self,
+        *,
+        user_id: UUID,
+        session_id: UUID,
+        question_id: UUID,
+        similar_question_id: UUID | None,
+        duplicate_type: str,
+        template_family: str,
+        reason: str,
+    ) -> QuestionDuplicateComplaint:
+        await self._session.execute(
+            insert(QuestionDuplicateComplaint)
+            .values(
+                user_id=user_id,
+                session_id=session_id,
+                question_id=question_id,
+                similar_question_id=similar_question_id,
+                duplicate_type=duplicate_type,
+                template_family=template_family,
+                reason=reason,
+                status="ACCEPTED",
+            )
+            .on_conflict_do_nothing(index_elements=["user_id", "session_id"])
+        )
+        result = await self._session.execute(
+            select(QuestionDuplicateComplaint).where(
+                QuestionDuplicateComplaint.user_id == user_id,
+                QuestionDuplicateComplaint.session_id == session_id,
+            )
+        )
+        complaint = result.scalar_one_or_none()
+        if complaint is None:
+            raise RuntimeError("duplicate complaint upsert did not return a row")
+        return complaint
+
+    async def invalidate_question(self, question_id: UUID) -> None:
+        question = await self._session.get(Question, question_id)
+        if question is not None:
+            question.status = "INVALID"
+        await self._session.flush()
+
+    async def invalidate_ready_questions_for_template(
+        self,
+        *,
+        user_id: UUID,
+        template_family: str,
+    ) -> None:
+        result = await self._session.execute(
+            select(Question)
+            .join(QuestionFingerprint, QuestionFingerprint.question_id == Question.id)
+            .where(
+                Question.user_id == user_id,
+                Question.status == "READY",
+                QuestionFingerprint.template_family == template_family,
+            )
+        )
+        for question in result.scalars().all():
+            question.status = "INVALID"
+        await self._session.flush()
+
+    async def invalidate_report_scores_for_session(self, session_id: UUID) -> None:
+        result = await self._session.execute(
+            select(EvaluationReport).where(EvaluationReport.session_id == session_id)
+        )
+        report = result.scalar_one_or_none()
+        if report is not None:
+            report.status = "INVALID"
+            report.logic_score = None
+            report.speech_score = None
+            report.adaptability_score = None
+            report.final_score = None
+            report.error_code = "DUPLICATE_QUESTION"
+            report.completed_at = datetime.now(UTC)
+        await self._session.flush()
+
     async def ensure_prompt_version(
         self,
         *,
@@ -441,3 +726,13 @@ class SourceQuestionRepository:
         self._session.add(model_run)
         await self._session.flush()
         return model_run
+
+
+def _vector_list(value: object) -> list[float] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [float(item) for item in value]
+    if isinstance(value, Iterable) and not isinstance(value, str | bytes):
+        return [float(item) for item in value]
+    return None

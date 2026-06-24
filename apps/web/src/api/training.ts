@@ -116,6 +116,32 @@ export interface TrainingProvenanceResponse {
   hypothetical_assumptions: string[];
 }
 
+export type DuplicateType =
+  | "text"
+  | "semantic"
+  | "parameter"
+  | "role"
+  | "structure"
+  | "answer_skeleton"
+  | "same_event"
+  | "other";
+
+export interface DuplicateComplaintRequest {
+  reason: string;
+  duplicate_type?: DuplicateType;
+  similar_question_id?: string | null;
+}
+
+export interface DuplicateComplaintResponse {
+  id: string;
+  session_id: string;
+  question_id: string;
+  template_family: string;
+  status: "ACCEPTED";
+  replacement_job_id: string;
+  created_at: string;
+}
+
 export async function createCurrentTraining(accessToken: string): Promise<TrainingSessionResponse> {
   return requestJson<TrainingSessionResponse>("/api/v1/trainings/current", {
     method: "POST",
@@ -212,6 +238,24 @@ export async function fetchTrainingProvenance(
   return requestJson<TrainingProvenanceResponse>(`/api/v1/trainings/${sessionId}/provenance`, {
     headers: authHeaders(accessToken),
   });
+}
+
+export async function createDuplicateComplaint(
+  accessToken: string,
+  sessionId: string,
+  payload: DuplicateComplaintRequest,
+): Promise<DuplicateComplaintResponse> {
+  return requestJson<DuplicateComplaintResponse>(
+    `/api/v1/trainings/${sessionId}/duplicate-complaints`,
+    {
+      method: "POST",
+      headers: {
+        ...authHeaders(accessToken),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 function preferredFilename(mimeType: string): string {

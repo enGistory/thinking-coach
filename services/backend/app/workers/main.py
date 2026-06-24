@@ -88,6 +88,7 @@ async def run_prepare_questions_job_once(*, bundle: ProviderBundle) -> bool:
                 session=session,
                 settings=settings,
                 llm_provider=bundle.llm,
+                embedding_provider=bundle.embedding,
                 search_provider=bundle.search,
                 content_fetcher=bundle.content_fetcher,
             ).prepare_questions_for_user(user_id=user_id, job_id=job_id)

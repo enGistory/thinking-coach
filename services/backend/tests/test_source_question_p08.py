@@ -25,6 +25,7 @@ from app.ai.providers.contracts import (
 )
 from app.ai.providers.mock import (
     MockContentFetcher,
+    MockEmbeddingProvider,
     MockLLMProvider,
     MockSearchProvider,
 )
@@ -165,6 +166,7 @@ async def test_prepare_questions_generates_ready_inventory(
             session=session,
             settings=_test_settings(tmp_path),
             llm_provider=MockLLMProvider(),
+            embedding_provider=MockEmbeddingProvider(),
             search_provider=MockSearchProvider(),
             content_fetcher=MockContentFetcher(),
         )
@@ -197,6 +199,7 @@ async def test_prepare_questions_retry_reuses_job_bundle_when_search_directions_
             session=session,
             settings=_test_settings(tmp_path),
             llm_provider=llm_provider,
+            embedding_provider=MockEmbeddingProvider(),
             search_provider=MockSearchProvider(),
             content_fetcher=MockContentFetcher(),
         )
@@ -208,6 +211,7 @@ async def test_prepare_questions_retry_reuses_job_bundle_when_search_directions_
             session=session,
             settings=_test_settings(tmp_path),
             llm_provider=llm_provider,
+            embedding_provider=MockEmbeddingProvider(),
             search_provider=MockSearchProvider(),
             content_fetcher=MockContentFetcher(),
         )
@@ -240,6 +244,7 @@ async def test_prepare_questions_fails_closed_without_sources(
             session=session,
             settings=_test_settings(tmp_path),
             llm_provider=MockLLMProvider(),
+            embedding_provider=MockEmbeddingProvider(),
             search_provider=MockSearchProvider(results=[]),
             content_fetcher=MockContentFetcher(),
         )
@@ -264,6 +269,7 @@ async def test_prepare_questions_rates_final_fetched_url(
             session=session,
             settings=_test_settings(tmp_path),
             llm_provider=MockLLMProvider(),
+            embedding_provider=MockEmbeddingProvider(),
             search_provider=MockSearchProvider(
                 results=[
                     SearchResult(
@@ -300,6 +306,7 @@ async def test_prepare_questions_dedupes_repeated_final_fetched_url(
             session=session,
             settings=_test_settings(tmp_path),
             llm_provider=MockLLMProvider(),
+            embedding_provider=MockEmbeddingProvider(),
             search_provider=MockSearchProvider(
                 results=[
                     SearchResult(

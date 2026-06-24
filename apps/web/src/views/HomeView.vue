@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { login } from "../api/auth";
 import { ApiError } from "../api/client";
 import {
+  createDuplicateComplaint,
   createCurrentTraining,
   createVoiceAttempt,
   fetchAttemptAudio,
@@ -13,6 +14,8 @@ import {
   resumeTraining,
   uploadAttemptAudio,
   type AttemptTranscriptResponse,
+  type DuplicateComplaintResponse,
+  type DuplicateType,
   type TrainingProvenanceResponse,
   type TranscriptSegmentResponse,
   type TrainingSessionResponse,
@@ -61,6 +64,10 @@ const remainingSeconds = ref(MAX_AUDIO_SECONDS);
 const playbackUrl = ref("");
 const transcript = ref<AttemptTranscriptResponse | null>(null);
 const provenance = ref<TrainingProvenanceResponse | null>(null);
+const duplicateType = ref<DuplicateType>("other");
+const duplicateReason = ref("");
+const duplicateComplaint = ref<DuplicateComplaintResponse | null>(null);
+const duplicateSubmitting = ref(false);
 const pendingAttemptId = ref(readLocalValue(PENDING_ATTEMPT_KEY));
 const playbackAudio = ref<SeekablePlayback | null>(null);
 
@@ -70,6 +77,14 @@ const canStartRecording = computed(
   () => isAuthenticated.value && recorderState.value === "idle" && awaitingInput.value !== null,
 );
 const hasPendingUpload = computed(() => recorderState.value === "pending" && pendingAttemptId.value.length > 0);
+const canSubmitDuplicateComplaint = computed(
+  () =>
+    trainingState.value?.stage === "COMPLETED" &&
+    provenance.value !== null &&
+    duplicateReason.value.trim().length > 0 &&
+    duplicateComplaint.value === null &&
+    !duplicateSubmitting.value,
+);
 
 let mediaRecorder: MediaRecorder | null = null;
 let mediaStream: MediaStream | null = null;
@@ -339,6 +354,36 @@ async function loadProvenance(sessionId: string) {
   provenance.value = await fetchTrainingProvenance(accessToken.value, sessionId);
 }
 
+async function submitDuplicateComplaint() {
+  clearMessages();
+  if (!accessToken.value || trainingState.value?.stage !== "COMPLETED") {
+    errorMessage.value = "Completed session required";
+    return;
+  }
+  const reason = duplicateReason.value.trim();
+  if (!reason) {
+    errorMessage.value = "Reason required";
+    return;
+  }
+
+  duplicateSubmitting.value = true;
+  try {
+    duplicateComplaint.value = await createDuplicateComplaint(
+      accessToken.value,
+      trainingState.value.id,
+      {
+        reason,
+        duplicate_type: duplicateType.value,
+      },
+    );
+    statusMessage.value = "Duplicate complaint accepted";
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "Duplicate complaint failed");
+  } finally {
+    duplicateSubmitting.value = false;
+  }
+}
+
 async function startNextRecording() {
   clearMessages();
   stopTranscriptPolling();
@@ -349,6 +394,9 @@ async function startNextRecording() {
   attempt.value = null;
   transcript.value = null;
   provenance.value = null;
+  duplicateType.value = "other";
+  duplicateReason.value = "";
+  duplicateComplaint.value = null;
   recorderState.value = "idle";
   statusMessage.value = "可开始下一条录音";
   await refreshTrainingState();
@@ -771,6 +819,60 @@ function removeLocalValue(key: string) {
               </ul>
             </article>
           </div>
+          <form
+            class="duplicate-form"
+            @submit.prevent="submitDuplicateComplaint"
+          >
+            <label>
+              <span>Duplicate type</span>
+              <select v-model="duplicateType">
+                <option value="other">
+                  Other
+                </option>
+                <option value="text">
+                  Text
+                </option>
+                <option value="semantic">
+                  Semantic
+                </option>
+                <option value="parameter">
+                  Parameter skin
+                </option>
+                <option value="role">
+                  Role skin
+                </option>
+                <option value="structure">
+                  Structure
+                </option>
+                <option value="answer_skeleton">
+                  Answer skeleton
+                </option>
+                <option value="same_event">
+                  Same event
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>Reason</span>
+              <textarea
+                v-model="duplicateReason"
+                maxlength="1000"
+                rows="3"
+              />
+            </label>
+            <button
+              :disabled="!canSubmitDuplicateComplaint"
+              type="submit"
+            >
+              Report duplicate
+            </button>
+            <p
+              v-if="duplicateComplaint"
+              class="inline-status"
+            >
+              Accepted, replacement job {{ duplicateComplaint.replacement_job_id }}
+            </p>
+          </form>
         </section>
       </div>
 

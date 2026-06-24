@@ -262,6 +262,26 @@ class DefectMemoryRepository:
         await self._session.flush()
         return appeal
 
+    async def exclude_session_occurrences(self, *, user_id: UUID, session_id: UUID) -> list[str]:
+        result = await self._session.execute(
+            select(DefectOccurrence).where(
+                DefectOccurrence.user_id == user_id,
+                DefectOccurrence.session_id == session_id,
+                DefectOccurrence.status.in_(["PENDING", "ACTIVE", "SUSPENDED"]),
+            )
+        )
+        affected_codes: set[str] = set()
+        for occurrence in result.scalars().all():
+            affected_codes.add(occurrence.defect_code)
+            occurrence.status = "EXCLUDED"
+            occurrence.previous_status = None
+            occurrence.suspending_appeal_id = None
+            occurrence.confirmed = False
+        for code in sorted(affected_codes):
+            await self.rebuild_profile(user_id=user_id, defect_code=code)
+        await self._session.flush()
+        return sorted(affected_codes)
+
     async def _report_issues(self, *, report_id: UUID, user_id: UUID) -> list[ReportIssueBundle]:
         result = await self._session.execute(
             select(TrainingSession, EvaluationReport, EvaluationIssue, VoiceAttempt)

@@ -15,6 +15,8 @@ from app.ai.providers.contracts import (
     ContentFetcher,
     ContentFetchRequest,
     ContentFetchResponse,
+    EmbeddingProvider,
+    EmbeddingRequest,
     LLMProvider,
     LLMStructuredRequest,
     ProviderError,
@@ -24,6 +26,19 @@ from app.ai.providers.contracts import (
 )
 from app.core.config import Settings
 from app.db.models import Question, QuestionSource, SourceBundle, SourceClaim
+from app.domain.question_dedupe import (
+    DEDUP_VECTOR_DIMENSIONS,
+    DIRECT_REJECT_SIMILARITY,
+    LLM_REVIEW_MIN_SIMILARITY,
+    HistoricalQuestion,
+    SimilarQuestion,
+    answer_skeleton_hash,
+    embedding_texts,
+    hash_text,
+    most_similar_questions,
+    overlaps_target_defect,
+    structure_comparison,
+)
 from app.domain.source_question import (
     ClaimGateInput,
     SourceLevel,
@@ -36,6 +51,7 @@ from app.domain.source_question import (
 from app.repositories.source_questions import (
     ClaimMappingWrite,
     ClaimWrite,
+    DedupeCheckWrite,
     QuestionWrite,
     RubricWrite,
     SourceQuestionRepository,
@@ -44,6 +60,7 @@ from app.repositories.source_questions import (
 from app.schemas.source_question import (
     ClaimExtractionResult,
     ClaimVerificationResult,
+    DedupeAdjudicationResult,
     QuestionCandidate,
     QuestionGenerationResult,
     RubricGenerationResult,
@@ -64,6 +81,24 @@ class SourceQuestionPrompt:
     user: str
 
 
+@dataclass(frozen=True)
+class DedupePrepared:
+    normalized_hash: str
+    template_family: str
+    source_event_id: str | None
+    prompt_embedding: list[float]
+    summary_embedding: list[float]
+    decision_embedding: list[float]
+    answer_skeleton_hash: str
+    decision: str
+    rejection_level: str | None
+    max_similarity: float | None
+    structure_change_count: int | None
+    matched_question_ids: list[str]
+    decision_json: dict[str, object]
+    input_summary_json: dict[str, object]
+
+
 class SourceQuestionError(RuntimeError):
     def __init__(self, code: str, detail: str) -> None:
         self.code = code
@@ -77,12 +112,14 @@ class SourceQuestionService:
         session: AsyncSession,
         settings: Settings,
         llm_provider: LLMProvider,
+        embedding_provider: EmbeddingProvider,
         search_provider: SearchProvider,
         content_fetcher: ContentFetcher,
     ) -> None:
         self._session = session
         self._settings = settings
         self._llm_provider = llm_provider
+        self._embedding_provider = embedding_provider
         self._search_provider = search_provider
         self._content_fetcher = content_fetcher
 
@@ -488,7 +525,26 @@ class SourceQuestionService:
         ):
             return None
         rubric = await self._generate_rubric(repo, candidate, job_id)
-        return await repo.create_ready_question(
+        dedupe = await self._dedupe_candidate(
+            repo=repo,
+            user_id=user_id,
+            bundle=bundle,
+            candidate=candidate,
+            rubric=rubric,
+            job_id=job_id,
+        )
+        if dedupe.decision == "REJECT":
+            await repo.record_dedupe_check(
+                _dedupe_check_write(
+                    user_id=user_id,
+                    bundle_id=bundle.id,
+                    question_id=None,
+                    candidate=candidate,
+                    dedupe=dedupe,
+                )
+            )
+            return None
+        created = await repo.create_ready_question(
             user_id=user_id,
             bundle=bundle,
             question=QuestionWrite(
@@ -500,10 +556,15 @@ class SourceQuestionService:
                 expected_reasoning=candidate.expected_reasoning,
                 prohibited_inferences=candidate.prohibited_inferences,
                 hypothetical_assumptions=candidate.hypothetical_assumptions,
-                normalized_hash=normalized_question_hash(candidate.prompt),
+                normalized_hash=dedupe.normalized_hash,
                 structural_json=candidate.fingerprint,
-                template_family=str(candidate.fingerprint.get("template_family", "p08")),
-                source_event_id=_source_event_id(candidate),
+                template_family=dedupe.template_family,
+                source_event_id=dedupe.source_event_id,
+                prompt_embedding=dedupe.prompt_embedding,
+                summary_embedding=dedupe.summary_embedding,
+                decision_embedding=dedupe.decision_embedding,
+                answer_skeleton_hash=dedupe.answer_skeleton_hash,
+                dedupe_decision_json=dedupe.decision_json,
             ),
             mappings=[
                 ClaimMappingWrite(
@@ -523,6 +584,303 @@ class SourceQuestionService:
                 content_hash=_rubric_hash(rubric),
             ),
         )
+        if created is not None:
+            await repo.record_dedupe_check(
+                _dedupe_check_write(
+                    user_id=user_id,
+                    bundle_id=bundle.id,
+                    question_id=created.id,
+                    candidate=candidate,
+                    dedupe=dedupe,
+                )
+            )
+        return created
+
+    async def _dedupe_candidate(
+        self,
+        *,
+        repo: SourceQuestionRepository,
+        user_id: UUID,
+        bundle: SourceBundle,
+        candidate: QuestionCandidate,
+        rubric: RubricGenerationResult,
+        job_id: UUID | None,
+    ) -> DedupePrepared:
+        template_family = str(candidate.fingerprint.get("template_family", "p09-default"))
+        source_event_id = _source_event_id(candidate)
+        normalized_hash = normalized_question_hash(candidate.prompt)
+        expected_reasoning = list(candidate.expected_reasoning)
+        reasoning_skeleton = candidate.fingerprint.get("reasoning_skeleton")
+        if isinstance(reasoning_skeleton, str) and reasoning_skeleton.strip():
+            expected_reasoning.append(reasoning_skeleton)
+        skeleton_hash = answer_skeleton_hash(
+            expected_reasoning=expected_reasoning,
+            expected_elements=rubric.expected_elements,
+            fatal_omissions=rubric.fatal_omissions,
+        )
+        prompt_text, summary_text, decision_text = embedding_texts(
+            prompt=candidate.prompt,
+            structural_json=candidate.fingerprint,
+            expected_reasoning=expected_reasoning,
+        )
+        embedding_response = await self._embedding_provider.embed_texts(
+            EmbeddingRequest(
+                texts=[prompt_text, summary_text, decision_text],
+                dimensions=DEDUP_VECTOR_DIMENSIONS,
+            )
+        )
+        prompt_embedding, summary_embedding, decision_embedding = [
+            list(vector) for vector in embedding_response.vectors
+        ]
+        base: dict[str, object] = {
+            "normalized_hash": normalized_hash,
+            "template_family": template_family,
+            "source_event_id": source_event_id,
+            "candidate_hash": hash_text(candidate.prompt),
+            "source_bundle_id": str(bundle.id),
+            "prompt_chars": len(candidate.prompt),
+            "target_defects": candidate.target_defects,
+        }
+        if await repo.template_family_denied(user_id=user_id, template_family=template_family):
+            return _prepared_reject(
+                normalized_hash=normalized_hash,
+                template_family=template_family,
+                source_event_id=source_event_id,
+                prompt_embedding=prompt_embedding,
+                summary_embedding=summary_embedding,
+                decision_embedding=decision_embedding,
+                answer_skeleton_hash=skeleton_hash,
+                level="L0_TEMPLATE_DENYLIST",
+                reason="template family is denied for this user",
+                input_summary=base,
+            )
+
+        histories = await repo.list_historical_questions(user_id=user_id)
+        matched_by_hash = [
+            history.question_id
+            for history in histories
+            if history.normalized_hash == normalized_hash
+        ]
+        if matched_by_hash:
+            return _prepared_reject(
+                normalized_hash=normalized_hash,
+                template_family=template_family,
+                source_event_id=source_event_id,
+                prompt_embedding=prompt_embedding,
+                summary_embedding=summary_embedding,
+                decision_embedding=decision_embedding,
+                answer_skeleton_hash=skeleton_hash,
+                level="L1_NORMALIZED_HASH",
+                reason="normalized hash matched a historical question",
+                input_summary=base,
+                matched_question_ids=matched_by_hash[:10],
+            )
+
+        matched_by_event = [
+            history.question_id
+            for history in histories
+            if source_event_id and history.source_event_id == source_event_id
+        ]
+        if matched_by_event:
+            return _prepared_reject(
+                normalized_hash=normalized_hash,
+                template_family=template_family,
+                source_event_id=source_event_id,
+                prompt_embedding=prompt_embedding,
+                summary_embedding=summary_embedding,
+                decision_embedding=decision_embedding,
+                answer_skeleton_hash=skeleton_hash,
+                level="L1_SOURCE_EVENT",
+                reason="source event is permanently retired",
+                input_summary=base,
+                matched_question_ids=matched_by_event[:10],
+            )
+
+        similar = most_similar_questions(
+            prompt_embedding=prompt_embedding,
+            summary_embedding=summary_embedding,
+            decision_embedding=decision_embedding,
+            histories=histories,
+        )
+        direct_match = next(
+            (item for item in similar if item.similarity >= DIRECT_REJECT_SIMILARITY),
+            None,
+        )
+        if direct_match is not None:
+            return _prepared_reject(
+                normalized_hash=normalized_hash,
+                template_family=template_family,
+                source_event_id=source_event_id,
+                prompt_embedding=prompt_embedding,
+                summary_embedding=summary_embedding,
+                decision_embedding=decision_embedding,
+                answer_skeleton_hash=skeleton_hash,
+                level="L2_EMBEDDING",
+                reason="semantic similarity is above the direct rejection threshold",
+                input_summary=base,
+                matched_question_ids=[item.question_id for item in similar],
+                max_similarity=direct_match.similarity,
+            )
+
+        high_priority = await repo.target_requires_high_variation(
+            user_id=user_id,
+            defects=candidate.target_defects,
+        )
+        structural_rejects = [
+            structure_comparison(
+                candidate_structural=candidate.fingerprint,
+                candidate_answer_skeleton_hash=skeleton_hash,
+                history=history,
+                high_priority=high_priority,
+            )
+            for history in histories
+            if overlaps_target_defect(candidate.target_defects, history.target_defects)
+        ]
+        structural_rejects = [
+            item
+            for item in structural_rejects
+            if len(item.changed_dimensions) < item.required_changes
+        ]
+        if structural_rejects:
+            closest = structural_rejects[0]
+            return _prepared_reject(
+                normalized_hash=normalized_hash,
+                template_family=template_family,
+                source_event_id=source_event_id,
+                prompt_embedding=prompt_embedding,
+                summary_embedding=summary_embedding,
+                decision_embedding=decision_embedding,
+                answer_skeleton_hash=skeleton_hash,
+                level="L3_STRUCTURE",
+                reason="not enough structural dimensions changed for a same-defect retest",
+                input_summary=base,
+                matched_question_ids=[item.question_id for item in structural_rejects[:10]],
+                structure_change_count=len(closest.changed_dimensions),
+            )
+
+        skeleton_matches = [
+            history.question_id
+            for history in histories
+            if history.answer_skeleton_hash and history.answer_skeleton_hash == skeleton_hash
+        ]
+        if skeleton_matches:
+            return _prepared_reject(
+                normalized_hash=normalized_hash,
+                template_family=template_family,
+                source_event_id=source_event_id,
+                prompt_embedding=prompt_embedding,
+                summary_embedding=summary_embedding,
+                decision_embedding=decision_embedding,
+                answer_skeleton_hash=skeleton_hash,
+                level="L3_ANSWER_SKELETON",
+                reason="answer skeleton matched a historical question",
+                input_summary=base,
+                matched_question_ids=skeleton_matches[:10],
+            )
+
+        gray_matches = [item for item in similar if item.similarity >= LLM_REVIEW_MIN_SIMILARITY][
+            :10
+        ]
+        if gray_matches:
+            adjudication = await self._dedupe_adjudication(
+                repo=repo,
+                candidate=candidate,
+                similar=gray_matches,
+                histories=histories,
+                job_id=job_id,
+            )
+            if adjudication.is_duplicate or adjudication.reusable_answer_skeleton:
+                return _prepared_reject(
+                    normalized_hash=normalized_hash,
+                    template_family=template_family,
+                    source_event_id=source_event_id,
+                    prompt_embedding=prompt_embedding,
+                    summary_embedding=summary_embedding,
+                    decision_embedding=decision_embedding,
+                    answer_skeleton_hash=skeleton_hash,
+                    level="L4_LLM_ADJUDICATION",
+                    reason=adjudication.reason,
+                    input_summary=base,
+                    matched_question_ids=[item.question_id for item in gray_matches],
+                    max_similarity=gray_matches[0].similarity,
+                    llm_output=adjudication.model_dump(mode="json"),
+                )
+
+        return DedupePrepared(
+            normalized_hash=normalized_hash,
+            template_family=template_family,
+            source_event_id=source_event_id,
+            prompt_embedding=prompt_embedding,
+            summary_embedding=summary_embedding,
+            decision_embedding=decision_embedding,
+            answer_skeleton_hash=skeleton_hash,
+            decision="PASS",
+            rejection_level=None,
+            max_similarity=similar[0].similarity if similar else None,
+            structure_change_count=None,
+            matched_question_ids=[item.question_id for item in similar[:10]],
+            decision_json={"decision": "PASS", "reason": "dedupe checks passed"},
+            input_summary_json=base,
+        )
+
+    async def _dedupe_adjudication(
+        self,
+        *,
+        repo: SourceQuestionRepository,
+        candidate: QuestionCandidate,
+        similar: list[SimilarQuestion],
+        histories: list[HistoricalQuestion],
+        job_id: UUID | None,
+    ) -> DedupeAdjudicationResult:
+        prompt = _load_prompt("dedupe_adjudication")
+        await repo.ensure_prompt_version(
+            name=prompt.name,
+            version=prompt.version,
+            content_hash=_hash_text(prompt.system + "\n" + prompt.user),
+            schema_version=SCHEMA_VERSION,
+        )
+        history_by_id = {history.question_id: history for history in histories}
+        payload = [
+            {
+                "question_id": item.question_id,
+                "similarity": round(item.similarity, 4),
+                "channel": item.channel,
+                "prompt": history_by_id[item.question_id].prompt,
+                "fingerprint": dict(history_by_id[item.question_id].structural_json),
+            }
+            for item in similar
+            if item.question_id in history_by_id
+        ]
+        response = await self._llm_provider.generate_structured(
+            LLMStructuredRequest(
+                model_slot="verify",
+                prompt_version=prompt.version,
+                messages=[
+                    ChatMessage(role="system", content=prompt.system),
+                    ChatMessage(
+                        role="user",
+                        content=prompt.user.format(
+                            candidate=candidate.model_dump_json(),
+                            historical_questions=json.dumps(payload, ensure_ascii=False),
+                        ),
+                    ),
+                ],
+                temperature=0.0,
+            ),
+            DedupeAdjudicationResult,
+        )
+        await repo.record_model_run(
+            job_id=job_id,
+            prompt_name=prompt.name,
+            prompt_version=prompt.version,
+            metadata=response.metadata,
+            input_summary_json={
+                "candidate_chars": len(candidate.prompt),
+                "similar_question_ids": [item.question_id for item in similar],
+            },
+            output_json=response.raw_json,
+        )
+        return cast(DedupeAdjudicationResult, response.output)
 
     async def _generate_rubric(
         self,
@@ -580,7 +938,76 @@ def _prompt_versions() -> dict[str, str]:
         "claim_verification": PROMPT_VERSION,
         "question_generation": PROMPT_VERSION,
         "rubric_generation": PROMPT_VERSION,
+        "dedupe_adjudication": PROMPT_VERSION,
     }
+
+
+def _prepared_reject(
+    *,
+    normalized_hash: str,
+    template_family: str,
+    source_event_id: str | None,
+    prompt_embedding: list[float],
+    summary_embedding: list[float],
+    decision_embedding: list[float],
+    answer_skeleton_hash: str,
+    level: str,
+    reason: str,
+    input_summary: dict[str, object],
+    matched_question_ids: list[str] | None = None,
+    max_similarity: float | None = None,
+    structure_change_count: int | None = None,
+    llm_output: dict[str, object] | None = None,
+) -> DedupePrepared:
+    decision_json: dict[str, object] = {
+        "decision": "REJECT",
+        "level": level,
+        "reason": reason,
+    }
+    if llm_output is not None:
+        decision_json["llm_output"] = llm_output
+    return DedupePrepared(
+        normalized_hash=normalized_hash,
+        template_family=template_family,
+        source_event_id=source_event_id,
+        prompt_embedding=prompt_embedding,
+        summary_embedding=summary_embedding,
+        decision_embedding=decision_embedding,
+        answer_skeleton_hash=answer_skeleton_hash,
+        decision="REJECT",
+        rejection_level=level,
+        max_similarity=max_similarity,
+        structure_change_count=structure_change_count,
+        matched_question_ids=matched_question_ids or [],
+        decision_json=decision_json,
+        input_summary_json=input_summary,
+    )
+
+
+def _dedupe_check_write(
+    *,
+    user_id: UUID,
+    bundle_id: UUID | None,
+    question_id: UUID | None,
+    candidate: QuestionCandidate,
+    dedupe: DedupePrepared,
+) -> DedupeCheckWrite:
+    return DedupeCheckWrite(
+        user_id=user_id,
+        source_bundle_id=bundle_id,
+        question_id=question_id,
+        candidate_hash=hash_text(candidate.prompt),
+        normalized_hash=dedupe.normalized_hash,
+        template_family=dedupe.template_family,
+        source_event_id=dedupe.source_event_id,
+        decision=dedupe.decision,
+        rejection_level=dedupe.rejection_level,
+        max_similarity=dedupe.max_similarity,
+        structure_change_count=dedupe.structure_change_count,
+        matched_question_ids=dedupe.matched_question_ids,
+        input_summary_json=dedupe.input_summary_json,
+        decision_json=dedupe.decision_json,
+    )
 
 
 def _bundle_credential(

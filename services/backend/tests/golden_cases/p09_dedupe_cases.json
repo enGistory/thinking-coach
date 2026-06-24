@@ -1,0 +1,20 @@
+[
+  {
+    "id": "digit_parameter_skin_rejected",
+    "left": "项目延期 100 万预算如何向负责人说明取舍",
+    "right": "项目延期 200 万预算如何向负责人说明取舍",
+    "same_hash": true
+  },
+  {
+    "id": "role_synonym_skin_rejected",
+    "left": "你要向上级说明客户投诉后的下一步",
+    "right": "你要向领导说明客户投诉后的下一步",
+    "same_hash": true
+  },
+  {
+    "id": "far_scenario_allowed",
+    "left": "项目延期后如何向负责人说明取舍",
+    "right": "供应商质量波动后如何调整验收门禁",
+    "same_hash": false
+  }
+]

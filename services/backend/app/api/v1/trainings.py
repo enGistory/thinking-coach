@@ -34,6 +34,8 @@ from app.repositories.transcripts import (
 )
 from app.schemas.defects import AppealRequest, AppealResponse
 from app.schemas.source_question import (
+    DuplicateComplaintRequest,
+    DuplicateComplaintResponse,
     ProvenanceClaimResponse,
     ProvenanceMappingResponse,
     ProvenanceSourceResponse,
@@ -62,6 +64,7 @@ from app.services.audio_storage import (
     save_audio_upload,
 )
 from app.services.defects import DefectMemoryError, DefectMemoryService
+from app.services.question_duplicates import DuplicateQuestionError, DuplicateQuestionService
 
 router = APIRouter(prefix="/api/v1", tags=["trainings"])
 
@@ -434,6 +437,42 @@ async def create_training_appeal(
         reason=appeal.reason,
         resolution=appeal.resolution,
         created_at=appeal.created_at,
+    )
+
+
+@router.post(
+    "/trainings/{session_id}/duplicate-complaints",
+    response_model=DuplicateComplaintResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_duplicate_complaint(
+    session_id: UUID,
+    payload: DuplicateComplaintRequest,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> DuplicateComplaintResponse:
+    try:
+        result = await DuplicateQuestionService(session=session).create_complaint(
+            user_id=current_user.id,
+            session_id=session_id,
+            reason=payload.reason,
+            duplicate_type=payload.duplicate_type,
+            similar_question_id=payload.similar_question_id,
+        )
+    except DuplicateQuestionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=exc.code,
+        ) from exc
+    await session.commit()
+    return DuplicateComplaintResponse(
+        id=result.complaint.id,
+        session_id=result.complaint.session_id,
+        question_id=result.complaint.question_id,
+        template_family=result.complaint.template_family,
+        status="ACCEPTED",
+        replacement_job_id=result.replacement_job.id,
+        created_at=result.complaint.created_at,
     )
 
 

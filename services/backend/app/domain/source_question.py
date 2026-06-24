@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlparse
+
+from app.domain.question_dedupe import normalized_question_hash as dedupe_question_hash
 
 SourceLevel = Literal["S", "A", "B", "C"]
 SupportStatus = Literal["VERIFIED", "CONFLICTED", "UNSUPPORTED"]
@@ -80,9 +81,7 @@ def question_ready(
 
 
 def normalized_question_hash(prompt: str) -> str:
-    normalized = re.sub(r"\s+", "", prompt.lower())
-    normalized = re.sub(r"[0-9\uFF10-\uFF19]+", "#", normalized)
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return dedupe_question_hash(prompt)
 
 
 def normalize_claim_text(value: str) -> str:
