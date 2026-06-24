@@ -7,6 +7,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 from pydantic.functional_validators import field_validator
 
+from app.schemas.source_question import SourceSummaryResponse
+
 AttemptStage = Literal["FIRST", "FOLLOWUP", "FINAL"]
 
 
@@ -52,6 +54,7 @@ class TrainingStateResponse(BaseModel):
     stage: str
     awaiting: TrainingAwaitingInputResponse | None
     current_attempt: VoiceAttemptResponse | None
+    source_summary: SourceSummaryResponse | None = None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None

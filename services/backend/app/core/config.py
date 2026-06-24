@@ -38,6 +38,11 @@ class AISettingsSummary(BaseModel):
     aliyun_tts_voice: str
     aliyun_embedding_model: str
     aliyun_embedding_dimensions: int
+    search_provider: str
+    bocha_key_configured: bool
+    bocha_search_endpoint: str
+    bocha_search_count: int
+    bocha_freshness: str
 
 
 class Settings(BaseSettings):
@@ -109,7 +114,12 @@ class Settings(BaseSettings):
     aliyun_oss_access_key_secret: SecretStr | None = None
     aliyun_oss_signed_url_ttl_seconds: int = 900
 
-    search_provider: str = "web_search"
+    search_provider: str = "bocha"
+    bocha_api_key: SecretStr | None = None
+    bocha_search_endpoint: str = "https://api.bochaai.com/v1/web-search"
+    bocha_search_count: int = 8
+    bocha_freshness: str = "oneYear"
+    run_live_search_tests: bool = False
 
     @property
     def audio_root_resolved(self) -> Path:
@@ -118,6 +128,10 @@ class Settings(BaseSettings):
     @property
     def ai_provider_mode_normalized(self) -> str:
         return self.ai_provider_mode.strip().lower()
+
+    @property
+    def search_provider_normalized(self) -> str:
+        return self.search_provider.strip().lower()
 
     def validate_ai(self) -> None:
         """Validate AI startup configuration without exposing secret values."""
@@ -174,7 +188,37 @@ class Settings(BaseSettings):
             aliyun_tts_voice=self.aliyun_tts_voice,
             aliyun_embedding_model=self.aliyun_embedding_model,
             aliyun_embedding_dimensions=self.aliyun_embedding_dimensions,
+            search_provider=self.search_provider_normalized,
+            bocha_key_configured=self._secret_has_value(self.bocha_api_key),
+            bocha_search_endpoint=self.bocha_search_endpoint,
+            bocha_search_count=self.bocha_search_count,
+            bocha_freshness=self.bocha_freshness,
         )
+
+    def validate_search(self) -> None:
+        provider = self.search_provider_normalized
+        if provider not in {"bocha", "mock"}:
+            raise ConfigurationError(
+                "SEARCH_PROVIDER_UNSUPPORTED",
+                "SEARCH_PROVIDER must be either bocha or mock",
+            )
+        if provider == "mock":
+            return
+        if not self._secret_has_value(self.bocha_api_key):
+            raise ConfigurationError(
+                "SEARCH_CONFIG_MISSING",
+                "BOCHA_API_KEY must be configured when SEARCH_PROVIDER=bocha",
+            )
+        self._validate_endpoint(
+            "BOCHA_SEARCH_ENDPOINT",
+            self.bocha_search_endpoint,
+            require_wss=False,
+        )
+        if self.bocha_search_count < 1 or self.bocha_search_count > 50:
+            raise ConfigurationError(
+                "SEARCH_COUNT_INVALID",
+                "BOCHA_SEARCH_COUNT must be between 1 and 50",
+            )
 
     def _missing_aliyun_settings(self) -> list[str]:
         required_strings = {

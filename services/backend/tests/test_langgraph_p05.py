@@ -30,6 +30,7 @@ from app.main import create_app
 from app.repositories.auth import UserRepository
 from app.repositories.jobs import EVALUATE_SESSION_JOB, GRAPH_RESUME_JOB
 from app.workers import main as worker_module
+from tests.helpers_source_questions import seed_ready_question
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 TEST_DATABASE_SYNC_URL = os.getenv("TEST_DATABASE_SYNC_URL")
@@ -98,8 +99,16 @@ async def test_voice_training_graph_queues_evaluation_after_three_attempts(
     settings = _test_settings(tmp_path)
     _patch_worker(monkeypatch, db_maker, settings)
     bundle = _provider_bundle("请说明你判断中最缺的证据是什么。")
-    await _create_user(db_maker, nickname="first", password="first-password", role="USER")
+    user_id = await _create_user(
+        db_maker,
+        nickname="first",
+        password="first-password",
+        role="USER",
+    )
     token = await _login(client, "first", "first-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=user_id)
+        await session.commit()
 
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
     assert current.status_code == 200
@@ -183,8 +192,16 @@ async def test_repeated_resume_reuses_graph_job(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _create_user(db_maker, nickname="repeat", password="repeat-password", role="USER")
+    user_id = await _create_user(
+        db_maker,
+        nickname="repeat",
+        password="repeat-password",
+        role="USER",
+    )
     token = await _login(client, "repeat", "repeat-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=user_id)
+        await session.commit()
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
     session_id = current.json()["id"]
     attempt = await _create_attempt(client, token, session_id, "FIRST", 1)
@@ -228,8 +245,16 @@ async def test_graph_resume_job_replay_after_checkpoint_advance_is_succeeded(
     settings = _test_settings(tmp_path)
     _patch_worker(monkeypatch, db_maker, settings)
     bundle = _provider_bundle("follow-up after replay")
-    await _create_user(db_maker, nickname="replay", password="replay-password", role="USER")
+    user_id = await _create_user(
+        db_maker,
+        nickname="replay",
+        password="replay-password",
+        role="USER",
+    )
     token = await _login(client, "replay", "replay-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=user_id)
+        await session.commit()
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
     session_id = current.json()["id"]
     attempt = await _create_attempt(client, token, session_id, "FIRST", 1)
@@ -273,10 +298,13 @@ async def test_graph_resume_job_replays_when_session_stage_advanced_before_check
     settings = _test_settings(tmp_path)
     _patch_worker(monkeypatch, db_maker, settings)
     bundle = _provider_bundle("checkpoint repaired follow-up")
-    await _create_user(
+    user_id = await _create_user(
         db_maker, nickname="stage-ahead", password="stage-ahead-password", role="USER"
     )
     token = await _login(client, "stage-ahead", "stage-ahead-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=user_id)
+        await session.commit()
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
     session_id = current.json()["id"]
     attempt = await _create_attempt(client, token, session_id, "FIRST", 1)
@@ -324,8 +352,16 @@ async def test_failed_retryable_session_does_not_block_new_current_session(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _create_user(db_maker, nickname="failed", password="failed-password", role="USER")
+    user_id = await _create_user(
+        db_maker,
+        nickname="failed",
+        password="failed-password",
+        role="USER",
+    )
     token = await _login(client, "failed", "failed-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=user_id)
+        await session.commit()
     first_current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
     assert first_current.status_code == 200
     failed_session_id = first_current.json()["id"]
@@ -334,6 +370,7 @@ async def test_failed_retryable_session_does_not_block_new_current_session(
         failed_session = await session.get(TrainingSession, UUID(failed_session_id))
         assert failed_session is not None
         failed_session.stage = "FAILED_RETRYABLE"
+        await seed_ready_question(session, user_id=user_id)
         await session.commit()
 
     next_current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
@@ -347,10 +384,18 @@ async def test_training_state_and_resume_are_private(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _create_user(db_maker, nickname="owner", password="owner-password", role="USER")
+    owner_user_id = await _create_user(
+        db_maker,
+        nickname="owner",
+        password="owner-password",
+        role="USER",
+    )
     await _create_user(db_maker, nickname="other", password="other-password", role="USER")
     owner_token = await _login(client, "owner", "owner-password")
     other_token = await _login(client, "other", "other-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=owner_user_id)
+        await session.commit()
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(owner_token))
     session_id = current.json()["id"]
     attempt = await _create_attempt(client, owner_token, session_id, "FIRST", 1)
@@ -430,14 +475,15 @@ async def _create_user(
     nickname: str,
     password: str,
     role: str,
-) -> None:
+) -> UUID:
     async with maker() as session:
-        await UserRepository(session).create_user(
+        user = await UserRepository(session).create_user(
             nickname=nickname,
             password_hash=hash_password(password),
             role=role,
         )
         await session.commit()
+        return user.id
 
 
 async def _login(client: AsyncClient, nickname: str, password: str) -> str:

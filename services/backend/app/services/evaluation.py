@@ -15,6 +15,7 @@ from app.db.models import EvaluationReport
 from app.domain.evidence import EvidenceSegment, verify_issue_evidence
 from app.domain.scoring import apply_score_rules
 from app.repositories.evaluations import EvaluationAttemptBundle, EvaluationRepository, IssueWrite
+from app.repositories.source_questions import SourceQuestionRepository
 from app.schemas.evaluation import (
     AdaptabilityReview,
     AnswerStructure,
@@ -103,14 +104,20 @@ class EvaluationService:
             return existing
 
         _ensure_ready_for_evaluation(context.attempts)
-        rubric = await repo.ensure_question_rubric(
-            training_session_id=session_id,
-            version=RUBRIC_VERSION,
-            dimensions_json=dict(DEFAULT_RUBRIC_DIMENSIONS),
-            expected_elements_json=list(DEFAULT_EXPECTED_ELEMENTS),
-            fatal_omissions_json=list(DEFAULT_FATAL_OMISSIONS),
-            content_hash=_rubric_hash(),
-        )
+        rubric = None
+        if context.training_session.question_id is not None:
+            rubric = await SourceQuestionRepository(self._session).get_question_rubric(
+                context.training_session.question_id
+            )
+        if rubric is None:
+            rubric = await repo.ensure_question_rubric(
+                training_session_id=session_id,
+                version=RUBRIC_VERSION,
+                dimensions_json=dict(DEFAULT_RUBRIC_DIMENSIONS),
+                expected_elements_json=list(DEFAULT_EXPECTED_ELEMENTS),
+                fatal_omissions_json=list(DEFAULT_FATAL_OMISSIONS),
+                content_hash=_rubric_hash(),
+            )
         report = await repo.start_report(session_id=session_id, rubric_id=rubric.id)
         answer_structure = await self._extract_answer_structure(
             repo,
@@ -123,6 +130,7 @@ class EvaluationService:
             report,
             context.attempts,
             answer_structure,
+            rubric.dimensions_json,
             job_id,
         )
         speech_review = _review_speech(context.attempts)
@@ -199,6 +207,7 @@ class EvaluationService:
         report: EvaluationReport,
         attempts: dict[str, EvaluationAttemptBundle],
         answer_structure: AnswerStructure,
+        rubric_dimensions: dict[str, object],
         job_id: UUID | None,
     ) -> LogicReview:
         prompt = _load_prompt("logic_review")
@@ -212,7 +221,7 @@ class EvaluationService:
                     ChatMessage(
                         role="user",
                         content=prompt.user.format(
-                            rubric=json.dumps(DEFAULT_RUBRIC_DIMENSIONS, ensure_ascii=False),
+                            rubric=json.dumps(rubric_dimensions, ensure_ascii=False),
                             answer_structure=answer_structure.model_dump_json(),
                             transcript=_combined_transcript(attempts),
                         ),

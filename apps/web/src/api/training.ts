@@ -29,12 +29,19 @@ export interface TrainingAwaitingInputResponse {
   text: string;
 }
 
+export interface SourceSummaryResponse {
+  source_count: number;
+  highest_source_level: "S" | "A" | "B" | "C" | null;
+  credential: string;
+}
+
 export interface TrainingStateResponse {
   id: string;
   thread_id: string;
   stage: string;
   awaiting: TrainingAwaitingInputResponse | null;
   current_attempt: VoiceAttemptResponse | null;
+  source_summary: SourceSummaryResponse | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -71,6 +78,42 @@ export interface AttemptTranscriptResponse {
   error_code: string | null;
   metrics: Record<string, unknown> | null;
   segments: TranscriptSegmentResponse[];
+}
+
+export interface ProvenanceClaimResponse {
+  id: string;
+  claim_text: string;
+  locator: string;
+  excerpt: string;
+  support_status: "VERIFIED" | "CONFLICTED" | "UNSUPPORTED";
+}
+
+export interface ProvenanceSourceResponse {
+  id: string;
+  title: string;
+  publisher: string;
+  url: string;
+  level: "S" | "A" | "B" | "C";
+  published_at: string | null;
+  accessed_at: string;
+  snapshot_hash: string;
+  claims: ProvenanceClaimResponse[];
+}
+
+export interface ProvenanceMappingResponse {
+  sentence_index: number;
+  sentence_text: string;
+  claim_ids: string[];
+}
+
+export interface TrainingProvenanceResponse {
+  session_id: string;
+  question_id: string;
+  prompt: string;
+  source_summary: SourceSummaryResponse;
+  sources: ProvenanceSourceResponse[];
+  mappings: ProvenanceMappingResponse[];
+  hypothetical_assumptions: string[];
 }
 
 export async function createCurrentTraining(accessToken: string): Promise<TrainingSessionResponse> {
@@ -158,6 +201,15 @@ export async function fetchAttemptTranscript(
   attemptId: string,
 ): Promise<AttemptTranscriptResponse> {
   return requestJson<AttemptTranscriptResponse>(`/api/v1/attempts/${attemptId}/transcript`, {
+    headers: authHeaders(accessToken),
+  });
+}
+
+export async function fetchTrainingProvenance(
+  accessToken: string,
+  sessionId: string,
+): Promise<TrainingProvenanceResponse> {
+  return requestJson<TrainingProvenanceResponse>(`/api/v1/trainings/${sessionId}/provenance`, {
     headers: authHeaders(accessToken),
   });
 }

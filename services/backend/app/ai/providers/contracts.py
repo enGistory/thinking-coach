@@ -128,6 +128,19 @@ class SearchRequest(BaseModel):
     recency_days: int | None = None
 
 
+class ContentFetchRequest(BaseModel):
+    url: str
+
+
+class ContentFetchResponse(BaseModel):
+    url: str
+    content_type: str
+    text: str
+    snapshot_hash: str
+    title: str | None = None
+    locator_prefix: str = "paragraph"
+
+
 class LLMProvider(Protocol):
     async def generate_structured(
         self,
@@ -155,3 +168,8 @@ class EmbeddingProvider(Protocol):
 class SearchProvider(Protocol):
     async def search(self, request: SearchRequest) -> Sequence[SearchResult]:
         """Search is defined here but implemented in the later source task."""
+
+
+class ContentFetcher(Protocol):
+    async def fetch(self, request: ContentFetchRequest) -> ContentFetchResponse:
+        """Fetch and extract evidence text from a public source URL."""

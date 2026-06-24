@@ -15,7 +15,15 @@ class TrainingRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get_or_create_current_audio_session(self, user_id: UUID) -> TrainingSession:
+    async def latest_active_audio_session(self, user_id: UUID) -> TrainingSession | None:
+        return await self._latest_active_audio_session(user_id)
+
+    async def create_audio_session_for_question(
+        self,
+        *,
+        user_id: UUID,
+        question_id: UUID,
+    ) -> TrainingSession:
         latest = await self._latest_active_audio_session(user_id)
         if latest is not None:
             return latest
@@ -24,6 +32,7 @@ class TrainingRepository:
         training_session = TrainingSession(
             id=session_id,
             user_id=user_id,
+            question_id=question_id,
             thread_id=str(session_id),
             stage="WAIT_FIRST_AUDIO",
         )
@@ -164,7 +173,6 @@ class TrainingRepository:
             .where(
                 TrainingSession.user_id == user_id,
                 TrainingSession.stage.not_in(TERMINAL_SESSION_STAGES),
-                TrainingSession.question_id.is_(None),
             )
             .order_by(TrainingSession.created_at.desc())
             .limit(1)

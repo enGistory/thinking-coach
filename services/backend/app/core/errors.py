@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.request_id import REQUEST_ID_HEADER, get_request_id
 
 
-def error_payload(code: str, message: str, request: Request) -> dict[str, dict[str, str]]:
+def error_payload(code: str, message: str, request: Request) -> dict[str, dict[str, object]]:
     return {
         "error": {
             "code": code,
@@ -30,10 +30,10 @@ def error_headers(request: Request, headers: Mapping[str, str] | None = None) ->
 def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        message = str(exc.detail) if exc.detail else "Request failed"
+        payload = _http_error_payload(request, exc.detail)
         return JSONResponse(
             status_code=exc.status_code,
-            content=error_payload("HTTP_ERROR", message, request),
+            content=payload,
             headers=error_headers(request, exc.headers),
         )
 
@@ -55,3 +55,20 @@ def install_exception_handlers(app: FastAPI) -> None:
             content=error_payload("INTERNAL_ERROR", "Internal server error", request),
             headers=error_headers(request),
         )
+
+
+def _http_error_payload(request: Request, detail: object) -> dict[str, dict[str, object]]:
+    if isinstance(detail, Mapping):
+        code = detail.get("code")
+        message = detail.get("message") or code or "Request failed"
+        payload = error_payload(
+            str(code) if code else "HTTP_ERROR",
+            str(message),
+            request,
+        )
+        for key, value in detail.items():
+            if key not in {"code", "message"} and isinstance(value, str | int | float | bool):
+                payload["error"][str(key)] = value
+        return payload
+    message = str(detail) if detail else "Request failed"
+    return error_payload("HTTP_ERROR", message, request)

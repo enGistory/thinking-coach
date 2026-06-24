@@ -31,6 +31,7 @@ from app.services.audio_storage import (
 from app.services.audio_storage import (
     save_audio_upload as real_save_audio_upload,
 )
+from tests.helpers_source_questions import seed_ready_question
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -100,10 +101,19 @@ async def test_attempt_upload_is_idempotent_and_private(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _create_user(db_maker, nickname="first", password="first-password", role="USER")
+    first_user_id = await _create_user(
+        db_maker,
+        nickname="first",
+        password="first-password",
+        role="USER",
+    )
     await _create_user(db_maker, nickname="second", password="second-password", role="USER")
     first_tokens = await _login(client, "first", "first-password")
     second_tokens = await _login(client, "second", "second-password")
+
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=first_user_id)
+        await session.commit()
 
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(first_tokens))
     assert current.status_code == 200
@@ -177,8 +187,11 @@ async def test_concurrent_upload_cannot_overwrite_first_answer(
     db_maker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    await _create_user(db_maker, nickname="race", password="race-password", role="USER")
+    user_id = await _create_user(db_maker, nickname="race", password="race-password", role="USER")
     access_token = await _login(client, "race", "race-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=user_id)
+        await session.commit()
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(access_token))
     session_id = current.json()["id"]
     attempt = await client.post(
@@ -259,8 +272,11 @@ async def test_upload_validation_does_not_consume_attempt(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _create_user(db_maker, nickname="user", password="user-password", role="USER")
+    user_id = await _create_user(db_maker, nickname="user", password="user-password", role="USER")
     access_token = await _login(client, "user", "user-password")
+    async with db_maker() as session:
+        await seed_ready_question(session, user_id=user_id)
+        await session.commit()
     current = await client.post("/api/v1/trainings/current", headers=_auth_headers(access_token))
     session_id = current.json()["id"]
     attempt = await client.post(
@@ -293,14 +309,15 @@ async def _create_user(
     nickname: str,
     password: str,
     role: str,
-) -> None:
+) -> UUID:
     async with maker() as session:
-        await UserRepository(session).create_user(
+        user = await UserRepository(session).create_user(
             nickname=nickname,
             password_hash=hash_password(password),
             role=role,
         )
         await session.commit()
+        return user.id
 
 
 async def _login(client: AsyncClient, nickname: str, password: str) -> str:

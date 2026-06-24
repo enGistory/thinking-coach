@@ -119,6 +119,215 @@ class UserTrainingPolicy(Base):
     )
 
 
+class SourceBundle(Base):
+    __tablename__ = "source_bundle"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT', 'READY', 'INVALID')",
+            name="ck_source_bundle_status",
+        ),
+        Index("ix_source_bundle_user_status", "user_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="DRAFT")
+    target_defects: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    search_queries: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    highest_source_level: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    credential: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    prompt_versions_json: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class QuestionSource(Base):
+    __tablename__ = "question_source"
+    __table_args__ = (
+        CheckConstraint("level IN ('S', 'A', 'B', 'C')", name="ck_question_source_level"),
+        UniqueConstraint("source_bundle_id", "url", name="uq_question_source_bundle_url"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    source_bundle_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("source_bundle.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    publisher: Mapped[str] = mapped_column(String(256), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[str] = mapped_column(String(1), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    extracted_characters: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fetch_status: Mapped[str] = mapped_column(String(32), nullable=False, default="SUCCEEDED")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class SourceClaim(Base):
+    __tablename__ = "source_claim"
+    __table_args__ = (
+        CheckConstraint(
+            "support_status IN ('VERIFIED', 'CONFLICTED', 'UNSUPPORTED')",
+            name="ck_source_claim_support_status",
+        ),
+        Index("ix_source_claim_source_status", "source_id", "support_status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    source_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question_source.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    claim_text: Mapped[str] = mapped_column(Text, nullable=False)
+    locator: Mapped[str] = mapped_column(String(256), nullable=False)
+    excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    support_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    verifier_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class Question(Base):
+    __tablename__ = "question"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT', 'VERIFIED', 'DEDUPED', 'READY', 'EXPOSED', 'RETIRED', 'INVALID')",
+            name="ck_question_status",
+        ),
+        Index("ix_question_user_status", "user_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_bundle_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("source_bundle.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_defects: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="DRAFT")
+    exposed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unsupported_claim_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_reasoning_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    prohibited_inferences_json: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    hypothetical_assumptions_json: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exposed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class QuestionClaimMap(Base):
+    __tablename__ = "question_claim_map"
+    __table_args__ = (
+        UniqueConstraint(
+            "question_id",
+            "claim_id",
+            "sentence_index",
+            "usage_type",
+            name="uq_question_claim_map_fact",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    question_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    claim_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("source_claim.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    usage_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    sentence_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sentence_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class QuestionFingerprint(Base):
+    __tablename__ = "question_fingerprint"
+    __table_args__ = (
+        UniqueConstraint("question_id", name="uq_question_fingerprint_question_id"),
+        UniqueConstraint("normalized_hash", name="uq_question_fingerprint_normalized_hash"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    question_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    normalized_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    structural_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    template_family: Mapped[str] = mapped_column(String(128), nullable=False, default="p08")
+    source_event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class TrainingSession(Base):
     __tablename__ = "training_session"
     __table_args__ = (
@@ -139,7 +348,11 @@ class TrainingSession(Base):
         ForeignKey("app_user.id", ondelete="CASCADE"),
         nullable=False,
     )
-    question_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    question_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     stage: Mapped[str] = mapped_column(String(32), nullable=False, default="WAIT_FIRST_AUDIO")
     scheduled_at: Mapped[datetime] = mapped_column(
@@ -319,15 +532,24 @@ class QuestionRubric(Base):
             "version",
             name="uq_question_rubric_session_version",
         ),
+        UniqueConstraint(
+            "question_id",
+            "version",
+            name="uq_question_rubric_question_version",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
-    training_session_id: Mapped[UUID] = mapped_column(
+    training_session_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("training_session.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
-    question_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    question_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("question.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     version: Mapped[str] = mapped_column(String(64), nullable=False)
     dimensions_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     expected_elements_json: Mapped[list[str]] = mapped_column(JSONB, nullable=False)

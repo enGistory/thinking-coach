@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { TrainingStateResponse } from "./api/training";
-import { shouldContinueTrainingStatePolling, syncTrainingStatePolling } from "./trainingFlow";
+import {
+  shouldContinueTrainingStatePolling,
+  shouldFetchTrainingProvenance,
+  syncTrainingStatePolling,
+} from "./trainingFlow";
 
 describe("training flow state polling", () => {
   it("continues polling while the graph is processing after transcript completion", () => {
@@ -47,11 +51,34 @@ describe("training flow state polling", () => {
 
     expect(calls).toEqual(["start", "stop"]);
   });
+
+  it("fetches provenance only for completed source-backed sessions", () => {
+    expect(
+      shouldFetchTrainingProvenance(
+        trainingState("COMPLETED", null, {
+          source_count: 1,
+          highest_source_level: "A",
+          credential: "SRC-TEST",
+        }),
+      ),
+    ).toBe(true);
+    expect(shouldFetchTrainingProvenance(trainingState("COMPLETED"))).toBe(false);
+    expect(
+      shouldFetchTrainingProvenance(
+        trainingState("WAIT_FIRST_AUDIO", null, {
+          source_count: 1,
+          highest_source_level: "A",
+          credential: "SRC-TEST",
+        }),
+      ),
+    ).toBe(false);
+  });
 });
 
 function trainingState(
   stage: string,
   awaiting: TrainingStateResponse["awaiting"] = null,
+  sourceSummary: TrainingStateResponse["source_summary"] = null,
 ): TrainingStateResponse {
   return {
     id: "session-1",
@@ -59,6 +86,7 @@ function trainingState(
     stage,
     awaiting,
     current_attempt: null,
+    source_summary: sourceSummary,
     created_at: "2026-06-22T00:00:00Z",
     updated_at: "2026-06-22T00:00:00Z",
     completed_at: stage === "COMPLETED" ? "2026-06-22T00:00:01Z" : null,

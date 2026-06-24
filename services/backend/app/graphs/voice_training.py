@@ -24,6 +24,7 @@ from app.ai.providers.contracts import (
 from app.core.config import Settings
 from app.db.models import TrainingSession
 from app.repositories.jobs import AIJobRepository
+from app.repositories.source_questions import SourceQuestionRepository
 from app.repositories.trainings import TrainingRepository
 from app.services.transcription import TranscriptionService
 
@@ -81,14 +82,18 @@ class VoiceTrainingError(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
-def initial_training_state(training_session: TrainingSession) -> TrainingState:
+def initial_training_state(
+    training_session: TrainingSession,
+    *,
+    question_text: str | None = None,
+) -> TrainingState:
     return {
         "session_id": str(training_session.id),
         "user_id": str(training_session.user_id),
         "current_stage": "WAIT_FIRST_AUDIO",
         "followup_round": 0,
         "max_followup_rounds": 1,
-        "question_text": DEV_QUESTION_TEXT,
+        "question_text": question_text or DEV_QUESTION_TEXT,
         "final_prompt_text": FINAL_PROMPT_TEXT,
         "error_code": None,
     }
@@ -106,6 +111,7 @@ async def resume_voice_training(
         graph = build_voice_training_graph(deps, checkpointer)
         config = _thread_config(training_session.thread_id)
         await _ensure_graph_started(
+            deps=deps,
             graph=graph,
             config=config,
             training_session=training_session,
@@ -188,6 +194,7 @@ async def open_postgres_checkpointer(settings: Settings) -> AsyncIterator[AsyncP
 
 async def _ensure_graph_started(
     *,
+    deps: VoiceTrainingDeps,
     graph: Any,
     config: dict[str, dict[str, str]],
     training_session: TrainingSession,
@@ -195,7 +202,11 @@ async def _ensure_graph_started(
     snapshot = await graph.aget_state(config)
     if getattr(snapshot, "values", None):
         return
-    await graph.ainvoke(initial_training_state(training_session), config=config)
+    question_text = await _question_text_for_session(deps, training_session)
+    await graph.ainvoke(
+        initial_training_state(training_session, question_text=question_text),
+        config=config,
+    )
 
 
 def _wait_first_audio(state: TrainingState) -> TrainingState:
@@ -263,7 +274,11 @@ def _process_first_answer(deps: VoiceTrainingDeps) -> GraphNode:
         attempt_id = _uuid_from_state(state, "first_attempt_id")
         await _set_session_stage(deps, session_id, user_id, "PROCESS_FIRST")
         transcript_text = await _transcribe_attempt(deps, attempt_id)
-        followup_text = await _generate_followup(deps, transcript_text)
+        followup_text = await _generate_followup(
+            deps,
+            state.get("question_text", DEV_QUESTION_TEXT),
+            transcript_text,
+        )
         await _set_session_stage(deps, session_id, user_id, "WAIT_FOLLOWUP_AUDIO")
         return {
             "current_stage": "WAIT_FOLLOWUP_AUDIO",
@@ -318,7 +333,11 @@ async def _transcribe_attempt(deps: VoiceTrainingDeps, attempt_id: UUID) -> str:
         return text
 
 
-async def _generate_followup(deps: VoiceTrainingDeps, first_answer: str) -> str:
+async def _generate_followup(
+    deps: VoiceTrainingDeps,
+    question_text: str,
+    first_answer: str,
+) -> str:
     response = await deps.llm_provider.generate_structured(
         LLMStructuredRequest(
             model_slot="dialog",
@@ -334,7 +353,7 @@ async def _generate_followup(deps: VoiceTrainingDeps, first_answer: str) -> str:
                 ChatMessage(
                     role="user",
                     content=(
-                        f"题目: {DEV_QUESTION_TEXT}\n"
+                        f"题目: {question_text}\n"
                         f"用户第一答转写: {first_answer}\n"
                         '请返回 JSON: {"ok": true, "message": "一个追问"}'
                     ),
@@ -386,6 +405,19 @@ async def _enqueue_evaluation(
             user_id=user_id,
         )
         await session.commit()
+
+
+async def _question_text_for_session(
+    deps: VoiceTrainingDeps,
+    training_session: TrainingSession,
+) -> str | None:
+    if training_session.question_id is None:
+        return None
+    async with deps.sessionmaker() as session:
+        question = await SourceQuestionRepository(session).get_question(
+            training_session.question_id
+        )
+        return question.prompt if question is not None else None
 
 
 def _attempt_id_from_resume(

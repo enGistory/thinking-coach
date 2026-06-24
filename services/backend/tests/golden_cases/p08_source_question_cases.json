@@ -1,0 +1,53 @@
+[
+  {
+    "id": "verified_a_level_claim_ready",
+    "description": "A-level verified claim with a fact mapping can become READY.",
+    "claims": [
+      {
+        "id": "claim-a-1",
+        "text": "官方报告显示团队没有更新成功标准。",
+        "source_id": "source-a",
+        "level": "A",
+        "support_status": "VERIFIED"
+      }
+    ],
+    "mapped_claim_ids": ["claim-a-1"],
+    "unsupported_claim_count": 0,
+    "fact_mapping_count": 1,
+    "expected_ready": true
+  },
+  {
+    "id": "unsupported_claim_rejected",
+    "description": "Unsupported facts must fail closed and never become READY.",
+    "claims": [
+      {
+        "id": "claim-bad-1",
+        "text": "来源没有支持的项目延期归因。",
+        "source_id": "source-a",
+        "level": "A",
+        "support_status": "UNSUPPORTED"
+      }
+    ],
+    "mapped_claim_ids": ["claim-bad-1"],
+    "unsupported_claim_count": 1,
+    "fact_mapping_count": 1,
+    "expected_ready": false
+  },
+  {
+    "id": "single_b_level_source_rejected",
+    "description": "B-level key facts need independent cross-source support.",
+    "claims": [
+      {
+        "id": "claim-b-1",
+        "text": "团队没有更新成功标准。",
+        "source_id": "source-b-1",
+        "level": "B",
+        "support_status": "VERIFIED"
+      }
+    ],
+    "mapped_claim_ids": ["claim-b-1"],
+    "unsupported_claim_count": 0,
+    "fact_mapping_count": 1,
+    "expected_ready": false
+  }
+]

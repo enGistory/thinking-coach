@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
@@ -12,7 +12,7 @@ from starlette import status
 from app.ai.providers.factory import create_provider_bundle
 from app.api.dependencies import get_current_user
 from app.core.config import Settings, get_settings
-from app.db.models import AppUser, TrainingSession, VoiceAttempt
+from app.db.models import AppUser, SourceBundle, TrainingSession, VoiceAttempt
 from app.db.session import get_session, get_sessionmaker
 from app.graphs.voice_training import (
     DEV_QUESTION_TEXT,
@@ -24,6 +24,7 @@ from app.repositories.jobs import (
     AIJobRepository,
     graph_resume_idempotency_key,
 )
+from app.repositories.source_questions import SourceQuestionRepository
 from app.repositories.training_policy import TrainingPolicyRepository
 from app.repositories.trainings import TrainingRepository
 from app.repositories.transcripts import (
@@ -32,6 +33,15 @@ from app.repositories.transcripts import (
     TranscriptRepository,
 )
 from app.schemas.defects import AppealRequest, AppealResponse
+from app.schemas.source_question import (
+    ProvenanceClaimResponse,
+    ProvenanceMappingResponse,
+    ProvenanceSourceResponse,
+    SourceLevel,
+    SourceSummaryResponse,
+    SupportStatus,
+    TrainingProvenanceResponse,
+)
 from app.schemas.training import (
     AttemptTranscriptResponse,
     AudioUploadResponse,
@@ -72,9 +82,27 @@ async def create_current_training_session(
     current_user: Annotated[AppUser, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TrainingSessionResponse:
-    training_session = await TrainingRepository(session).get_or_create_current_audio_session(
-        current_user.id
+    training_repo = TrainingRepository(session)
+    existing = await training_repo.latest_active_audio_session(current_user.id)
+    if existing is not None:
+        await session.commit()
+        return _training_session_response(existing)
+
+    source_repo = SourceQuestionRepository(session)
+    question = await source_repo.claim_ready_question_for_user(current_user.id)
+    if question is None:
+        job = await AIJobRepository(session).enqueue_prepare_questions(user_id=current_user.id)
+        await session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "QUESTION_NOT_READY", "job_id": str(job.id)},
+        )
+    training_session = await training_repo.create_audio_session_for_question(
+        user_id=current_user.id,
+        question_id=question.id,
     )
+    if training_session.question_id == question.id:
+        await source_repo.mark_question_exposed(question)
     await session.commit()
     return _training_session_response(training_session)
 
@@ -130,6 +158,61 @@ async def get_training_state(
             )
         )
     return await _training_state_response(session, training_session, graph_state)
+
+
+@router.get(
+    "/trainings/{session_id}/provenance",
+    response_model=TrainingProvenanceResponse,
+)
+async def get_training_provenance(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TrainingProvenanceResponse:
+    provenance = await SourceQuestionRepository(session).get_owned_provenance(
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    if provenance is None:
+        raise _not_found()
+    return TrainingProvenanceResponse(
+        session_id=provenance.training_session.id,
+        question_id=provenance.question.id,
+        prompt=provenance.question.prompt,
+        source_summary=_source_summary_from_bundle(provenance.source_bundle),
+        sources=[
+            ProvenanceSourceResponse(
+                id=source.id,
+                title=source.title,
+                publisher=source.publisher,
+                url=source.url,
+                level=cast(SourceLevel, source.level),
+                published_at=source.published_at,
+                accessed_at=source.accessed_at,
+                snapshot_hash=source.snapshot_hash,
+                claims=[
+                    ProvenanceClaimResponse(
+                        id=claim.id,
+                        claim_text=claim.claim_text,
+                        locator=claim.locator,
+                        excerpt=claim.excerpt,
+                        support_status=cast(SupportStatus, claim.support_status),
+                    )
+                    for claim in provenance.claims_by_source.get(source.id, [])
+                ],
+            )
+            for source in provenance.sources
+        ],
+        mappings=[
+            ProvenanceMappingResponse(
+                sentence_index=mapping.sentence_index,
+                sentence_text=mapping.sentence_text,
+                claim_ids=[mapping.claim_id],
+            )
+            for mapping in provenance.mappings
+        ],
+        hypothetical_assumptions=provenance.question.hypothetical_assumptions_json,
+    )
 
 
 @router.post(
@@ -436,24 +519,53 @@ async def _training_state_response(
         id=training_session.id,
         thread_id=training_session.thread_id,
         stage=training_session.stage,
-        awaiting=_awaiting_input_response(training_session.stage, graph_state),
+        awaiting=await _awaiting_input_response(session, training_session, graph_state),
         current_attempt=await _current_attempt_response(session, training_session),
+        source_summary=await _source_summary_response(session, training_session.question_id),
         created_at=training_session.created_at,
         updated_at=training_session.updated_at,
         completed_at=training_session.completed_at,
     )
 
 
-def _awaiting_input_response(
-    session_stage: str,
+async def _question_text(session: AsyncSession, question_id: UUID | None) -> str | None:
+    if question_id is None:
+        return None
+    question = await SourceQuestionRepository(session).get_question(question_id)
+    return question.prompt if question is not None else None
+
+
+async def _source_summary_response(
+    session: AsyncSession,
+    question_id: UUID | None,
+) -> SourceSummaryResponse | None:
+    if question_id is None:
+        return None
+    bundle = await SourceQuestionRepository(session).get_source_bundle_for_question(question_id)
+    return _source_summary_from_bundle(bundle) if bundle is not None else None
+
+
+def _source_summary_from_bundle(bundle: SourceBundle) -> SourceSummaryResponse:
+    return SourceSummaryResponse(
+        source_count=bundle.source_count,
+        highest_source_level=cast(SourceLevel | None, bundle.highest_source_level),
+        credential=bundle.credential,
+    )
+
+
+async def _awaiting_input_response(
+    session: AsyncSession,
+    training_session: TrainingSession,
     graph_state: dict[str, object],
 ) -> TrainingAwaitingInputResponse | None:
+    session_stage = training_session.stage
     if session_stage == "WAIT_FIRST_AUDIO":
+        question_text = await _question_text(session, training_session.question_id)
         return TrainingAwaitingInputResponse(
             type="FIRST_ANSWER",
             stage="FIRST",
             round=1,
-            text=DEV_QUESTION_TEXT,
+            text=question_text or DEV_QUESTION_TEXT,
         )
     if session_stage == "WAIT_FOLLOWUP_AUDIO":
         followup_text = graph_state.get("followup_text")

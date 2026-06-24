@@ -12,6 +12,7 @@ from app.db.models import AIJob
 GRAPH_RESUME_JOB = "GRAPH_RESUME"
 TRANSCRIBE_ATTEMPT_JOB = "TRANSCRIBE_ATTEMPT"
 EVALUATE_SESSION_JOB = "EVALUATE_SESSION"
+PREPARE_QUESTIONS_JOB = "PREPARE_QUESTIONS"
 AI_JOB_LEASE_SECONDS = 30 * 60
 AI_JOB_MAX_RETRIES = 2
 TRANSCRIBE_JOB_LEASE_SECONDS = AI_JOB_LEASE_SECONDS
@@ -30,6 +31,10 @@ def graph_resume_idempotency_key(
 
 def evaluation_idempotency_key(session_id: UUID) -> str:
     return f"evaluate_session:{session_id}"
+
+
+def prepare_questions_idempotency_key(user_id: UUID) -> str:
+    return f"prepare_questions:{user_id}"
 
 
 class AIJobRepository:
@@ -106,6 +111,41 @@ class AIJobRepository:
         if job is None:
             raise RuntimeError("evaluation job upsert did not return a row")
         return job
+
+    async def enqueue_prepare_questions(self, *, user_id: UUID) -> AIJob:
+        idempotency_key = prepare_questions_idempotency_key(user_id)
+        await self._insert_prepare_questions_job(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+        )
+        job = await self.get_by_idempotency_key(idempotency_key)
+        if job is None:
+            raise RuntimeError("question preparation job upsert did not return a row")
+        if job.status in {"PENDING", "RUNNING"}:
+            return job
+        job.idempotency_key = f"{idempotency_key}:archived:{job.id}"
+        await self._session.flush()
+        await self._insert_prepare_questions_job(
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+        )
+        new_job = await self.get_by_idempotency_key(idempotency_key)
+        if new_job is None:
+            raise RuntimeError("question preparation job upsert did not return a row")
+        return new_job
+
+    async def _insert_prepare_questions_job(self, *, user_id: UUID, idempotency_key: str) -> None:
+        statement = (
+            insert(AIJob)
+            .values(
+                job_type=PREPARE_QUESTIONS_JOB,
+                payload={"user_id": str(user_id)},
+                status="PENDING",
+                idempotency_key=idempotency_key,
+            )
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        )
+        await self._session.execute(statement)
 
     async def claim_next(self, job_type: str) -> AIJob | None:
         lease_expires_before = datetime.now(UTC) - timedelta(seconds=AI_JOB_LEASE_SECONDS)

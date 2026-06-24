@@ -31,6 +31,7 @@ from app.db.session import get_session
 from app.main import create_app
 from app.repositories.defects import DefectMemoryRepository
 from app.services.defects import DefectMemoryService
+from tests.helpers_source_questions import seed_ready_question
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 TEST_DATABASE_SYNC_URL = os.getenv("TEST_DATABASE_SYNC_URL")
@@ -558,6 +559,8 @@ async def _seed_report(
     quote: str = "answer missed the core",
 ) -> tuple[UUID, UUID, UUID]:
     async with maker() as session:
+        if question_id is not None:
+            await seed_ready_question(session, user_id=user_id, question_id=question_id)
         training_session = TrainingSession(
             user_id=user_id,
             question_id=question_id,

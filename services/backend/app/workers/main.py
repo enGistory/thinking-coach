@@ -18,11 +18,13 @@ from app.graphs.voice_training import (
 from app.repositories.jobs import (
     EVALUATE_SESSION_JOB,
     GRAPH_RESUME_JOB,
+    PREPARE_QUESTIONS_JOB,
     TRANSCRIBE_ATTEMPT_JOB,
     AIJobRepository,
 )
 from app.repositories.transcripts import TranscriptRepository
 from app.services.evaluation import EvaluationService
+from app.services.source_questions import SourceQuestionService
 from app.services.transcription import TranscriptionService
 
 POLL_SECONDS = 1.0
@@ -55,13 +57,50 @@ async def run_worker() -> None:
     settings.validate_ai()
     bundle = create_provider_bundle(settings)
     while True:
-        processed = await run_graph_resume_job_once(bundle=bundle)
+        processed = await run_prepare_questions_job_once(bundle=bundle)
+        if not processed:
+            processed = await run_graph_resume_job_once(bundle=bundle)
         if not processed:
             processed = await run_evaluation_job_once(bundle=bundle)
         if not processed:
             processed = await run_transcription_job_once(stt_provider=bundle.stt)
         if not processed:
             await asyncio.sleep(POLL_SECONDS)
+
+
+async def run_prepare_questions_job_once(*, bundle: ProviderBundle) -> bool:
+    settings = get_settings()
+    maker = get_sessionmaker()
+    async with maker() as session:
+        job_repo = AIJobRepository(session)
+        job = await job_repo.claim_next(PREPARE_QUESTIONS_JOB)
+        if job is None:
+            await session.rollback()
+            return False
+        job_id = job.id
+        payload = job.payload
+        await session.commit()
+
+    try:
+        user_id = _uuid_from_payload(payload, "user_id")
+        async with maker() as session:
+            await SourceQuestionService(
+                session=session,
+                settings=settings,
+                llm_provider=bundle.llm,
+                search_provider=bundle.search,
+                content_fetcher=bundle.content_fetcher,
+            ).prepare_questions_for_user(user_id=user_id, job_id=job_id)
+            await session.commit()
+        await _mark_job_succeeded(job_id)
+    except Exception as exc:
+        async with maker() as session:
+            job_repo = AIJobRepository(session)
+            job = await job_repo.get_by_id(job_id)
+            if job is not None:
+                await job_repo.mark_retryable_failure(job, _error_code(exc))
+            await session.commit()
+    return True
 
 
 async def run_graph_resume_job_once(*, bundle: ProviderBundle) -> bool:

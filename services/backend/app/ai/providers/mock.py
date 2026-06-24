@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from time import perf_counter
 
 from pydantic import BaseModel
 
 from app.ai.providers.contracts import (
+    ContentFetchRequest,
+    ContentFetchResponse,
     EmbeddingRequest,
     EmbeddingResponse,
     LLMStructuredRequest,
     LLMStructuredResponse,
     ProviderCallMetadata,
     ProviderUsage,
+    SearchRequest,
+    SearchResult,
     STTRequest,
     STTResponse,
     Transcript,
@@ -29,7 +34,7 @@ def _elapsed_ms(start: float) -> int:
 
 class MockLLMProvider:
     def __init__(self, payload: Mapping[str, object] | None = None) -> None:
-        self.payload = dict(payload or {"ok": True, "message": "mock structured response"})
+        self.payload = dict(payload) if payload is not None else None
 
     async def generate_structured(
         self,
@@ -37,10 +42,11 @@ class MockLLMProvider:
         response_model: type[BaseModel],
     ) -> LLMStructuredResponse:
         start = perf_counter()
-        parsed = response_model.model_validate(self.payload)
+        payload = self.payload or _mock_payload_for_schema(response_model, request)
+        parsed = response_model.model_validate(payload)
         return LLMStructuredResponse(
             output=parsed,
-            raw_json=dict(self.payload),
+            raw_json=dict(payload),
             metadata=ProviderCallMetadata(
                 provider="mock",
                 model=f"mock-{request.model_slot}",
@@ -131,3 +137,149 @@ class MockEmbeddingProvider:
     def _vector_for_text(text: str, dimensions: int) -> list[float]:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         return [digest[index % len(digest)] / 255 for index in range(dimensions)]
+
+
+class MockSearchProvider:
+    def __init__(self, results: list[SearchResult] | None = None) -> None:
+        self.results = (
+            [
+                SearchResult(
+                    title="官方项目复盘",
+                    url="https://example.edu/official-report/source-a",
+                    snippet="项目复盘摘要",
+                    source="Example 官方研究报告",
+                    published_at="2026-01-01T00:00:00+08:00",
+                )
+            ]
+            if results is None
+            else results
+        )
+        self.requests: list[SearchRequest] = []
+
+    async def search(self, request: SearchRequest) -> list[SearchResult]:
+        self.requests.append(request)
+        return list(self.results)
+
+
+class MockContentFetcher:
+    def __init__(self, pages: Mapping[str, str] | None = None) -> None:
+        self.pages = dict(
+            {
+                "https://example.edu/official-report/source-a": (
+                    "官方项目复盘显示,团队在需求频繁变化后没有更新成功标准。"
+                    "复盘还指出,技术方案评审缺少备选方案。"
+                )
+            }
+            if pages is None
+            else pages
+        )
+        self.requests: list[ContentFetchRequest] = []
+
+    async def fetch(self, request: ContentFetchRequest) -> ContentFetchResponse:
+        self.requests.append(request)
+        text = self.pages.get(request.url, "")
+        return ContentFetchResponse(
+            url=request.url,
+            content_type="text/html",
+            text=text,
+            snapshot_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            title="mock source",
+        )
+
+
+def _mock_payload_for_schema(
+    response_model: type[BaseModel],
+    request: LLMStructuredRequest,
+) -> dict[str, object]:
+    name = response_model.__name__
+    if name == "SearchDirectionPlan":
+        return {"queries": ["项目延期 官方复盘 成功标准 备选方案"]}
+    if name == "ClaimExtractionResult":
+        return {
+            "claims": [
+                {
+                    "ref": "c1",
+                    "claim_text": "团队在需求频繁变化后没有更新成功标准。",
+                    "evidence_locator": "paragraph 1",
+                    "evidence_excerpt": "团队在需求频繁变化后没有更新成功标准",
+                },
+                {
+                    "ref": "c2",
+                    "claim_text": "技术方案评审缺少备选方案。",
+                    "evidence_locator": "paragraph 1",
+                    "evidence_excerpt": "技术方案评审缺少备选方案",
+                },
+            ]
+        }
+    if name == "ClaimVerificationResult":
+        return {
+            "claims": [
+                {"ref": "c1", "support_status": "VERIFIED", "reason": "excerpt matches"},
+                {"ref": "c2", "support_status": "VERIFIED", "reason": "excerpt matches"},
+            ]
+        }
+    if name == "QuestionGenerationResult":
+        claim_ids = _uuids_from_messages(request.messages)
+        first_claim = claim_ids[0] if claim_ids else "00000000-0000-0000-0000-000000000000"
+        scenarios = [
+            "资源调配",
+            "验收口径",
+            "上线节奏",
+            "供应商选择",
+            "预算调整",
+            "质量门禁",
+            "客户沟通",
+            "风险应对",
+        ]
+        return {
+            "candidates": [
+                {
+                    "prompt": (
+                        f"候选题: 项目延期后,{scenario}材料显示团队没有更新成功标准。"
+                        "你需要向负责人说明当前判断、证据缺口、取舍和下一步。"
+                    ),
+                    "type": "decision",
+                    "target_defects": ["ALIGN-01", "INFO-01"],
+                    "claim_ids": [first_claim],
+                    "fact_mappings": [
+                        {
+                            "sentence_index": 0,
+                            "sentence_text": "材料显示团队没有更新成功标准。",
+                            "claim_ids": [first_claim],
+                        }
+                    ],
+                    "fingerprint": {
+                        "domain": "project",
+                        "role": "manager",
+                        "decision_object": scenario,
+                        "template_family": "mock-p08",
+                    },
+                    "expected_reasoning": ["区分事实、假设和未知"],
+                    "prohibited_inferences": ["不得补充来源未支持的因果"],
+                    "hypothetical_assumptions": [],
+                }
+                for scenario in scenarios
+            ]
+        }
+    if name == "RubricGenerationResult":
+        return {
+            "dimensions": {
+                "alignment": 20,
+                "structure": 15,
+                "evidence": 20,
+                "tradeoffs": 15,
+                "risk_action": 15,
+                "audience_fit": 15,
+            },
+            "expected_elements": ["结论", "事实", "假设", "未知", "取舍", "下一步"],
+            "fatal_omissions": ["答非所问", "把假设当事实"],
+        }
+    return {"ok": True, "message": "mock structured response"}
+
+
+def _uuids_from_messages(messages: Sequence[object]) -> list[str]:
+    text = "\n".join(getattr(message, "content", "") for message in messages)
+    return re.findall(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        text,
+    )

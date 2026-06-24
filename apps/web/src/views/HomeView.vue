@@ -2,15 +2,18 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { login } from "../api/auth";
+import { ApiError } from "../api/client";
 import {
   createCurrentTraining,
   createVoiceAttempt,
   fetchAttemptAudio,
   fetchAttemptTranscript,
+  fetchTrainingProvenance,
   fetchTrainingState,
   resumeTraining,
   uploadAttemptAudio,
   type AttemptTranscriptResponse,
+  type TrainingProvenanceResponse,
   type TranscriptSegmentResponse,
   type TrainingSessionResponse,
   type TrainingStateResponse,
@@ -34,7 +37,11 @@ import {
   deletePendingAudioBestEffort,
   type PendingAudioRecord,
 } from "../audio/pendingAudioStore";
-import { shouldContinueTrainingStatePolling, syncTrainingStatePolling } from "../trainingFlow";
+import {
+  shouldContinueTrainingStatePolling,
+  shouldFetchTrainingProvenance,
+  syncTrainingStatePolling,
+} from "../trainingFlow";
 
 type RecorderState = "idle" | "recording" | "uploading" | "pending" | "uploaded";
 
@@ -53,6 +60,7 @@ const errorMessage = ref("");
 const remainingSeconds = ref(MAX_AUDIO_SECONDS);
 const playbackUrl = ref("");
 const transcript = ref<AttemptTranscriptResponse | null>(null);
+const provenance = ref<TrainingProvenanceResponse | null>(null);
 const pendingAttemptId = ref(readLocalValue(PENDING_ATTEMPT_KEY));
 const playbackAudio = ref<SeekablePlayback | null>(null);
 
@@ -125,6 +133,11 @@ async function refreshTrainingState(): Promise<TrainingStateResponse> {
   if (trainingState.value.stage === "COMPLETED") {
     statusMessage.value = "本轮答辩已完成";
     recorderState.value = "uploaded";
+    if (shouldFetchTrainingProvenance(trainingState.value)) {
+      await loadProvenance(trainingState.value.id);
+    } else {
+      provenance.value = null;
+    }
   } else if (trainingState.value.awaiting !== null && recorderState.value !== "pending") {
     statusMessage.value = stageStatusText(trainingState.value.awaiting.stage);
     recorderState.value = "idle";
@@ -319,6 +332,13 @@ async function loadPlayback(attemptId: string) {
   playbackUrl.value = URL.createObjectURL(audioBlob);
 }
 
+async function loadProvenance(sessionId: string) {
+  if (!accessToken.value || provenance.value?.session_id === sessionId) {
+    return;
+  }
+  provenance.value = await fetchTrainingProvenance(accessToken.value, sessionId);
+}
+
 async function startNextRecording() {
   clearMessages();
   stopTranscriptPolling();
@@ -328,6 +348,7 @@ async function startNextRecording() {
   trainingState.value = null;
   attempt.value = null;
   transcript.value = null;
+  provenance.value = null;
   recorderState.value = "idle";
   statusMessage.value = "可开始下一条录音";
   await refreshTrainingState();
@@ -477,6 +498,9 @@ function clearMessages() {
 }
 
 function errorToMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && error.status === 409) {
+    return "题目准备中，请稍后重试";
+  }
   if (error instanceof Error && error.message) {
     return error.message;
   }
@@ -595,6 +619,23 @@ function removeLocalValue(key: string) {
         >
           <span>{{ awaitingInput.stage }}</span>
           <p>{{ awaitingInput.text }}</p>
+          <dl
+            v-if="trainingState?.source_summary"
+            class="source-summary"
+          >
+            <div>
+              <dt>sources</dt>
+              <dd>{{ trainingState.source_summary.source_count }}</dd>
+            </div>
+            <div>
+              <dt>level</dt>
+              <dd>{{ trainingState.source_summary.highest_source_level ?? "—" }}</dd>
+            </div>
+            <div>
+              <dt>credential</dt>
+              <dd>{{ trainingState.source_summary.credential }}</dd>
+            </div>
+          </dl>
         </section>
 
         <div class="controls">
@@ -694,6 +735,41 @@ function removeLocalValue(key: string) {
               <span>{{ (segment.start_ms / 1000).toFixed(1) }}s</span>
               <strong>{{ segment.corrected_text }}</strong>
             </button>
+          </div>
+        </section>
+
+        <section
+          v-if="provenance"
+          class="provenance"
+          aria-labelledby="provenance-title"
+        >
+          <div class="transcript-header">
+            <h2 id="provenance-title">
+              来源
+            </h2>
+            <span>{{ provenance.source_summary.credential }}</span>
+          </div>
+          <div class="source-list">
+            <article
+              v-for="source in provenance.sources"
+              :key="source.id"
+            >
+              <a
+                :href="source.url"
+                rel="noreferrer"
+                target="_blank"
+              >{{ source.title }}</a>
+              <span>{{ source.publisher }} · {{ source.level }}</span>
+              <ul>
+                <li
+                  v-for="claim in source.claims"
+                  :key="claim.id"
+                >
+                  <strong>{{ claim.locator }}</strong>
+                  <span>{{ claim.excerpt }}</span>
+                </li>
+              </ul>
+            </article>
           </div>
         </section>
       </div>

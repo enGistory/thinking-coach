@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createVoiceAttempt,
   fetchAttemptTranscript,
+  fetchTrainingProvenance,
   fetchTrainingState,
   resumeTraining,
   uploadAttemptAudio,
@@ -66,6 +67,7 @@ describe("training API", () => {
             text: "追问文本",
           },
           current_attempt: null,
+          source_summary: null,
           created_at: "2026-06-22T00:00:00Z",
           updated_at: "2026-06-22T00:00:00Z",
           completed_at: null,
@@ -78,6 +80,61 @@ describe("training API", () => {
 
     expect(response.awaiting?.stage).toBe("FOLLOWUP");
     expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/state");
+    expect(calls[0]?.init?.headers).toEqual({ Authorization: "Bearer token-1" });
+  });
+
+  it("fetches completed training provenance with bearer auth", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          session_id: "session-1",
+          question_id: "question-1",
+          prompt: "题目文本",
+          source_summary: {
+            source_count: 1,
+            highest_source_level: "A",
+            credential: "SRC-TEST",
+          },
+          sources: [
+            {
+              id: "source-1",
+              title: "官方报告",
+              publisher: "Example 官方",
+              url: "https://example.com/report",
+              level: "A",
+              published_at: null,
+              accessed_at: "2026-06-22T00:00:00Z",
+              snapshot_hash: "a".repeat(64),
+              claims: [
+                {
+                  id: "claim-1",
+                  claim_text: "来源支持的事实",
+                  locator: "paragraph 1",
+                  excerpt: "来源支持的事实",
+                  support_status: "VERIFIED",
+                },
+              ],
+            },
+          ],
+          mappings: [
+            {
+              sentence_index: 0,
+              sentence_text: "题目事实句",
+              claim_ids: ["claim-1"],
+            },
+          ],
+          hypothetical_assumptions: [],
+        }),
+        { status: 200 },
+      );
+    });
+
+    const response = await fetchTrainingProvenance("token-1", "session-1");
+
+    expect(response.sources[0]?.claims[0]?.support_status).toBe("VERIFIED");
+    expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/provenance");
     expect(calls[0]?.init?.headers).toEqual({ Authorization: "Bearer token-1" });
   });
 

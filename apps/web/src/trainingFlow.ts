@@ -11,6 +11,10 @@ export function shouldContinueTrainingStatePolling(state: TrainingStateResponse)
   return state.awaiting === null && PROCESSING_TRAINING_STAGES.has(state.stage);
 }
 
+export function shouldFetchTrainingProvenance(state: TrainingStateResponse): boolean {
+  return state.stage === "COMPLETED" && state.source_summary !== null;
+}
+
 export function syncTrainingStatePolling(
   state: TrainingStateResponse,
   controls: TrainingStatePollingControls,
