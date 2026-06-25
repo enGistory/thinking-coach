@@ -31,7 +31,7 @@ from app.services.audio_storage import (
 from app.services.audio_storage import (
     save_audio_upload as real_save_audio_upload,
 )
-from tests.helpers_source_questions import seed_ready_question
+from tests.helpers_source_questions import seed_exposed_training_session
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -112,12 +112,9 @@ async def test_attempt_upload_is_idempotent_and_private(
     second_tokens = await _login(client, "second", "second-password")
 
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=first_user_id)
+        training_session = await seed_exposed_training_session(session, user_id=first_user_id)
+        session_id = str(training_session.id)
         await session.commit()
-
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(first_tokens))
-    assert current.status_code == 200
-    session_id = current.json()["id"]
 
     first_attempt = await client.post(
         f"/api/v1/trainings/{session_id}/attempts",
@@ -190,10 +187,10 @@ async def test_concurrent_upload_cannot_overwrite_first_answer(
     user_id = await _create_user(db_maker, nickname="race", password="race-password", role="USER")
     access_token = await _login(client, "race", "race-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(access_token))
-    session_id = current.json()["id"]
+
     attempt = await client.post(
         f"/api/v1/trainings/{session_id}/attempts",
         headers=_auth_headers(access_token),
@@ -275,10 +272,10 @@ async def test_upload_validation_does_not_consume_attempt(
     user_id = await _create_user(db_maker, nickname="user", password="user-password", role="USER")
     access_token = await _login(client, "user", "user-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(access_token))
-    session_id = current.json()["id"]
+
     attempt = await client.post(
         f"/api/v1/trainings/{session_id}/attempts",
         headers=_auth_headers(access_token),

@@ -30,7 +30,7 @@ from app.main import create_app
 from app.repositories.auth import UserRepository
 from app.repositories.jobs import EVALUATE_SESSION_JOB, GRAPH_RESUME_JOB
 from app.workers import main as worker_module
-from tests.helpers_source_questions import seed_ready_question
+from tests.helpers_source_questions import seed_exposed_training_session
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 TEST_DATABASE_SYNC_URL = os.getenv("TEST_DATABASE_SYNC_URL")
@@ -107,12 +107,9 @@ async def test_voice_training_graph_queues_evaluation_after_three_attempts(
     )
     token = await _login(client, "first", "first-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
-    assert current.status_code == 200
-    session_id = current.json()["id"]
 
     first_state = await client.get(
         f"/api/v1/trainings/{session_id}/state",
@@ -200,10 +197,10 @@ async def test_repeated_resume_reuses_graph_job(
     )
     token = await _login(client, "repeat", "repeat-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
-    session_id = current.json()["id"]
+
     attempt = await _create_attempt(client, token, session_id, "FIRST", 1)
     upload = await _upload_audio(client, token, attempt["id"], b"same-first-answer")
     assert upload.status_code == 200
@@ -253,10 +250,10 @@ async def test_graph_resume_job_replay_after_checkpoint_advance_is_succeeded(
     )
     token = await _login(client, "replay", "replay-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
-    session_id = current.json()["id"]
+
     attempt = await _create_attempt(client, token, session_id, "FIRST", 1)
     upload = await _upload_audio(client, token, attempt["id"], b"first-answer")
     assert upload.status_code == 200
@@ -303,10 +300,10 @@ async def test_graph_resume_job_replays_when_session_stage_advanced_before_check
     )
     token = await _login(client, "stage-ahead", "stage-ahead-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
-    session_id = current.json()["id"]
+
     attempt = await _create_attempt(client, token, session_id, "FIRST", 1)
     upload = await _upload_audio(client, token, attempt["id"], b"first-answer")
     assert upload.status_code == 200
@@ -360,23 +357,23 @@ async def test_failed_retryable_session_does_not_block_new_current_session(
     )
     token = await _login(client, "failed", "failed-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        failed_session_id = str(training_session.id)
         await session.commit()
-    first_current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
-    assert first_current.status_code == 200
-    failed_session_id = first_current.json()["id"]
 
     async with db_maker() as session:
         failed_session = await session.get(TrainingSession, UUID(failed_session_id))
         assert failed_session is not None
         failed_session.stage = "FAILED_RETRYABLE"
-        await seed_ready_question(session, user_id=user_id)
+        next_session = await seed_exposed_training_session(session, user_id=user_id)
+        next_session_id = str(next_session.id)
         await session.commit()
 
-    next_current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
+    next_current = await client.get("/api/v1/trainings/current", headers=_auth_headers(token))
 
     assert next_current.status_code == 200
     assert next_current.json()["id"] != failed_session_id
+    assert next_current.json()["id"] == next_session_id
     assert next_current.json()["stage"] == "WAIT_FIRST_AUDIO"
 
 
@@ -394,10 +391,10 @@ async def test_training_state_and_resume_are_private(
     owner_token = await _login(client, "owner", "owner-password")
     other_token = await _login(client, "other", "other-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=owner_user_id)
+        training_session = await seed_exposed_training_session(session, user_id=owner_user_id)
+        session_id = str(training_session.id)
         await session.commit()
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(owner_token))
-    session_id = current.json()["id"]
+
     attempt = await _create_attempt(client, owner_token, session_id, "FIRST", 1)
     await _upload_audio(client, owner_token, attempt["id"], b"private-answer")
 

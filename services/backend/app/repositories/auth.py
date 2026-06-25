@@ -41,6 +41,14 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_active_users(self) -> list[AppUser]:
+        result = await self._session.execute(
+            select(AppUser)
+            .where(AppUser.status == "ACTIVE", AppUser.role == "USER")
+            .order_by(AppUser.created_at)
+        )
+        return list(result.scalars().all())
+
     async def has_admin(self) -> bool:
         result = await self._session.execute(
             select(AppUser.id).where(AppUser.role == "ADMIN").limit(1)

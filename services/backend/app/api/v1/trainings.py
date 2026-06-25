@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from random import Random
 from typing import Annotated, cast
 from uuid import UUID
 
@@ -64,11 +65,15 @@ from app.services.audio_storage import (
     save_audio_upload,
 )
 from app.services.defects import DefectMemoryError, DefectMemoryService
+from app.services.push import PyWebPushSender
 from app.services.question_duplicates import DuplicateQuestionError, DuplicateQuestionService
+from app.services.random_strike import RandomStrikeError, RandomStrikeService
 
 router = APIRouter(prefix="/api/v1", tags=["trainings"])
 
 WAITING_ATTEMPT_SLOTS = {
+    "ACCEPTED": ("FIRST", 1),
+    "QUESTION_EXPOSED": ("FIRST", 1),
     "WAIT_FIRST_AUDIO": ("FIRST", 1),
     "WAIT_FOLLOWUP_AUDIO": ("FOLLOWUP", 1),
     "WAIT_FINAL_AUDIO": ("FINAL", 1),
@@ -80,32 +85,109 @@ PROCESSING_STAGE_BY_ATTEMPT_STAGE = {
 }
 
 
-@router.post("/trainings/current", response_model=TrainingSessionResponse)
-async def create_current_training_session(
+@router.get("/trainings/current", response_model=TrainingSessionResponse)
+async def get_current_training_session(
     current_user: Annotated[AppUser, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TrainingSessionResponse:
-    training_repo = TrainingRepository(session)
-    existing = await training_repo.latest_active_audio_session(current_user.id)
-    if existing is not None:
-        await session.commit()
-        return _training_session_response(existing)
+    training_session = await TrainingRepository(session).current_visible_session(
+        current_user.id,
+        now=datetime.now(UTC),
+    )
+    if training_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "NO_CURRENT_TRAINING"},
+        )
+    return _training_session_response(training_session)
 
-    source_repo = SourceQuestionRepository(session)
-    question = await source_repo.claim_ready_question_for_user(current_user.id)
-    if question is None:
-        job = await AIJobRepository(session).enqueue_prepare_questions(user_id=current_user.id)
+
+@router.post("/trainings/{session_id}/accept", response_model=TrainingSessionResponse)
+async def accept_training(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TrainingSessionResponse:
+    training_session = await TrainingRepository(session).get_owned_session_for_update(
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    if training_session is None:
+        raise _not_found()
+    settings = get_settings()
+    try:
+        await RandomStrikeService(
+            session=session,
+            settings=settings,
+            push_sender=PyWebPushSender(settings),
+        ).accept(training_session=training_session, now=datetime.now(UTC))
+    except RandomStrikeError as exc:
         await session.commit()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "QUESTION_NOT_READY", "job_id": str(job.id)},
-        )
-    training_session = await training_repo.create_audio_session_for_question(
+            detail={"code": exc.code},
+        ) from exc
+    await session.commit()
+    return _training_session_response(training_session)
+
+
+@router.post("/trainings/{session_id}/defer", response_model=TrainingSessionResponse)
+async def defer_training(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TrainingSessionResponse:
+    training_session = await TrainingRepository(session).get_owned_session_for_update(
+        session_id=session_id,
         user_id=current_user.id,
-        question_id=question.id,
     )
-    if training_session.question_id == question.id:
-        await source_repo.mark_question_exposed(question)
+    if training_session is None:
+        raise _not_found()
+    settings = get_settings()
+    try:
+        await RandomStrikeService(
+            session=session,
+            settings=settings,
+            push_sender=PyWebPushSender(settings),
+        ).defer(
+            training_session=training_session,
+            now=datetime.now(UTC),
+            rng=Random(f"defer:{training_session.id}:{training_session.deferred_count}"),
+        )
+    except RandomStrikeError as exc:
+        await session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code},
+        ) from exc
+    await session.commit()
+    return _training_session_response(training_session)
+
+
+@router.post("/trainings/{session_id}/abandon", response_model=TrainingSessionResponse)
+async def abandon_training(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TrainingSessionResponse:
+    training_session = await TrainingRepository(session).get_owned_session_for_update(
+        session_id=session_id,
+        user_id=current_user.id,
+    )
+    if training_session is None:
+        raise _not_found()
+    settings = get_settings()
+    try:
+        await RandomStrikeService(
+            session=session,
+            settings=settings,
+            push_sender=PyWebPushSender(settings),
+        ).abandon(training_session=training_session)
+    except RandomStrikeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code},
+        ) from exc
     await session.commit()
     return _training_session_response(training_session)
 
@@ -560,7 +642,7 @@ async def _training_state_response(
         stage=training_session.stage,
         awaiting=await _awaiting_input_response(session, training_session, graph_state),
         current_attempt=await _current_attempt_response(session, training_session),
-        source_summary=await _source_summary_response(session, training_session.question_id),
+        source_summary=await _visible_source_summary_response(session, training_session),
         created_at=training_session.created_at,
         updated_at=training_session.updated_at,
         completed_at=training_session.completed_at,
@@ -584,6 +666,15 @@ async def _source_summary_response(
     return _source_summary_from_bundle(bundle) if bundle is not None else None
 
 
+async def _visible_source_summary_response(
+    session: AsyncSession,
+    training_session: TrainingSession,
+) -> SourceSummaryResponse | None:
+    if training_session.stage in {"SCHEDULED", "NOTIFIED", "EXPIRED"}:
+        return None
+    return await _source_summary_response(session, training_session.question_id)
+
+
 def _source_summary_from_bundle(bundle: SourceBundle) -> SourceSummaryResponse:
     return SourceSummaryResponse(
         source_count=bundle.source_count,
@@ -598,7 +689,7 @@ async def _awaiting_input_response(
     graph_state: dict[str, object],
 ) -> TrainingAwaitingInputResponse | None:
     session_stage = training_session.stage
-    if session_stage == "WAIT_FIRST_AUDIO":
+    if session_stage in {"ACCEPTED", "QUESTION_EXPOSED", "WAIT_FIRST_AUDIO"}:
         question_text = await _question_text(session, training_session.question_id)
         return TrainingAwaitingInputResponse(
             type="FIRST_ANSWER",
@@ -652,6 +743,9 @@ def _training_session_response(training_session: TrainingSession) -> TrainingSes
         id=training_session.id,
         thread_id=training_session.thread_id,
         stage=training_session.stage,
+        scheduled_at=training_session.scheduled_at,
+        notification_expires_at=training_session.notification_expires_at,
+        accepted_at=training_session.accepted_at,
         created_at=training_session.created_at,
     )
 

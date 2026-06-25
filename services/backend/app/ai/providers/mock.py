@@ -235,7 +235,7 @@ def _mock_payload_for_schema(
             "candidates": [
                 {
                     "prompt": (
-                        f"候选题: 项目延期后,{scenario}材料显示团队没有更新成功标准。"
+                        f"候选题: 项目延期后, 已知事实是{scenario}团队没有更新成功标准。"
                         "你需要向负责人说明当前判断、证据缺口、取舍和下一步。"
                     ),
                     "type": "decision",
@@ -244,7 +244,7 @@ def _mock_payload_for_schema(
                     "fact_mappings": [
                         {
                             "sentence_index": 0,
-                            "sentence_text": "材料显示团队没有更新成功标准。",
+                            "sentence_text": "团队没有更新成功标准。",
                             "claim_ids": [first_claim],
                         }
                     ],

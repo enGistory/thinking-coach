@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { login } from "../api/auth";
+import { login, refreshAuth, type TokenPair } from "../api/auth";
 import { ApiError } from "../api/client";
 import {
+  abandonTraining,
+  acceptTraining,
   createDuplicateComplaint,
-  createCurrentTraining,
+  deferTraining,
+  fetchCurrentTraining,
   createVoiceAttempt,
   fetchAttemptAudio,
   fetchAttemptTranscript,
@@ -41,14 +44,19 @@ import {
   type PendingAudioRecord,
 } from "../audio/pendingAudioStore";
 import {
+  restorableSessionIdFromHref,
   shouldContinueTrainingStatePolling,
   shouldFetchTrainingProvenance,
+  shouldRestoreStoredTrainingState,
   syncTrainingStatePolling,
 } from "../trainingFlow";
+import { setupPushNotifications, type PushSetupResult } from "../pushNotifications";
 
 type RecorderState = "idle" | "recording" | "uploading" | "pending" | "uploaded";
 
 const ACCESS_TOKEN_KEY = "thinkingCoachAccessToken";
+const REFRESH_TOKEN_KEY = "thinkingCoachRefreshToken";
+const ACTIVE_SESSION_KEY = "thinkingCoachActiveSessionId";
 const PENDING_ATTEMPT_KEY = "thinkingCoachPendingAttemptId";
 
 const nickname = ref("");
@@ -60,6 +68,7 @@ const attempt = ref<VoiceAttemptResponse | null>(null);
 const recorderState = ref<RecorderState>("idle");
 const statusMessage = ref("等待登录");
 const errorMessage = ref("");
+const notificationStatus = ref("");
 const remainingSeconds = ref(MAX_AUDIO_SECONDS);
 const playbackUrl = ref("");
 const transcript = ref<AttemptTranscriptResponse | null>(null);
@@ -68,13 +77,29 @@ const duplicateType = ref<DuplicateType>("other");
 const duplicateReason = ref("");
 const duplicateComplaint = ref<DuplicateComplaintResponse | null>(null);
 const duplicateSubmitting = ref(false);
+const activeSessionId = ref(readRestorableSessionId());
 const pendingAttemptId = ref(readLocalValue(PENDING_ATTEMPT_KEY));
 const playbackAudio = ref<SeekablePlayback | null>(null);
 
 const isAuthenticated = computed(() => accessToken.value.length > 0);
 const awaitingInput = computed(() => trainingState.value?.awaiting ?? null);
+const hasNotifiedStrike = computed(() => isLiveNotifiedSession(trainingSession.value));
 const canStartRecording = computed(
   () => isAuthenticated.value && recorderState.value === "idle" && awaitingInput.value !== null,
+);
+const canAcceptStrike = computed(() => isAuthenticated.value && hasNotifiedStrike.value);
+const canDeferStrike = computed(() => isAuthenticated.value && hasNotifiedStrike.value);
+const canAbandonTraining = computed(
+  () =>
+    isAuthenticated.value &&
+    trainingState.value !== null &&
+    [
+      "ACCEPTED",
+      "QUESTION_EXPOSED",
+      "WAIT_FIRST_AUDIO",
+      "WAIT_FOLLOWUP_AUDIO",
+      "WAIT_FINAL_AUDIO",
+    ].includes(trainingState.value.stage),
 );
 const hasPendingUpload = computed(() => recorderState.value === "pending" && pendingAttemptId.value.length > 0);
 const canSubmitDuplicateComplaint = computed(
@@ -97,10 +122,7 @@ let trainingStatePollTimer: number | undefined;
 let inMemoryPendingRecord: PendingAudioRecord | null = null;
 
 onMounted(() => {
-  if (isAuthenticated.value) {
-    statusMessage.value = "已恢复登录状态";
-    void restoreTrainingFlow();
-  }
+  void restoreAuthSession();
 });
 
 onBeforeUnmount(() => {
@@ -118,12 +140,32 @@ async function submitLogin() {
       nickname: nickname.value,
       password: password.value,
     });
-    accessToken.value = tokens.access_token;
-    writeSessionValue(ACCESS_TOKEN_KEY, tokens.access_token);
+    rememberTokenPair(tokens);
     statusMessage.value = "登录成功";
     await restoreTrainingFlow();
   } catch (error) {
     errorMessage.value = errorToMessage(error, "登录失败");
+  }
+}
+
+async function restoreAuthSession() {
+  if (isAuthenticated.value) {
+    statusMessage.value = "已恢复登录状态";
+    await restoreTrainingFlow();
+    return;
+  }
+  const refreshToken = readLocalValue(REFRESH_TOKEN_KEY);
+  if (!refreshToken) {
+    return;
+  }
+  statusMessage.value = "正在恢复登录";
+  try {
+    rememberTokenPair(await refreshAuth({ refresh_token: refreshToken }));
+    statusMessage.value = "已恢复登录状态";
+    await restoreTrainingFlow();
+  } catch {
+    forgetAuthTokens();
+    statusMessage.value = "等待登录";
   }
 }
 
@@ -134,7 +176,8 @@ async function ensureTrainingSession(): Promise<TrainingSessionResponse> {
   if (trainingSession.value !== null) {
     return trainingSession.value;
   }
-  trainingSession.value = await createCurrentTraining(accessToken.value);
+  trainingSession.value = await fetchCurrentTraining(accessToken.value);
+  rememberActiveSessionId(trainingSession.value.id);
   return trainingSession.value;
 }
 
@@ -142,28 +185,87 @@ async function refreshTrainingState(): Promise<TrainingStateResponse> {
   if (!accessToken.value) {
     throw new Error("请先登录");
   }
-  const session = await ensureTrainingSession();
-  trainingState.value = await fetchTrainingState(accessToken.value, session.id);
+  let session: TrainingSessionResponse;
+  try {
+    session = await ensureTrainingSession();
+  } catch (error) {
+    if (isNoCurrentTraining(error)) {
+      const restored = await restoreCompletedTrainingState();
+      if (restored !== null) {
+        return restored;
+      }
+      clearCurrentTraining();
+      return emptyTrainingState();
+    }
+    throw error;
+  }
+  if (session.stage === "NOTIFIED" && !isLiveNotifiedSession(session)) {
+    clearCurrentTraining();
+    return emptyTrainingState();
+  }
+  return await loadAndApplyTrainingState(session.id, session.stage);
+}
+
+async function restoreCompletedTrainingState(): Promise<TrainingStateResponse | null> {
+  if (!accessToken.value || !activeSessionId.value) {
+    return null;
+  }
+  let restored: TrainingStateResponse;
+  try {
+    restored = await fetchTrainingState(accessToken.value, activeSessionId.value);
+  } catch (error) {
+    if (isNoCurrentTraining(error)) {
+      forgetActiveSessionId();
+      return null;
+    }
+    throw error;
+  }
+  if (!shouldRestoreStoredTrainingState(restored)) {
+    forgetActiveSessionId();
+    return null;
+  }
+  trainingSession.value = null;
+  trainingState.value = restored;
+  attempt.value = restored.current_attempt;
+  await applyTrainingStateStatus(restored, null);
+  return restored;
+}
+
+async function loadAndApplyTrainingState(
+  sessionId: string,
+  sessionStage: string | null,
+): Promise<TrainingStateResponse> {
+  trainingState.value = await fetchTrainingState(accessToken.value, sessionId);
   attempt.value = trainingState.value.current_attempt;
-  if (trainingState.value.stage === "COMPLETED") {
+  await applyTrainingStateStatus(trainingState.value, sessionStage);
+  return trainingState.value;
+}
+
+async function applyTrainingStateStatus(
+  state: TrainingStateResponse,
+  sessionStage: string | null,
+) {
+  if (sessionStage === "NOTIFIED") {
+    statusMessage.value = "突击已到达";
+    recorderState.value = "idle";
+  } else if (state.stage === "COMPLETED") {
     statusMessage.value = "本轮答辩已完成";
     recorderState.value = "uploaded";
-    if (shouldFetchTrainingProvenance(trainingState.value)) {
-      await loadProvenance(trainingState.value.id);
+    if (shouldFetchTrainingProvenance(state)) {
+      await loadProvenance(state.id);
     } else {
       provenance.value = null;
     }
-  } else if (trainingState.value.awaiting !== null && recorderState.value !== "pending") {
-    statusMessage.value = stageStatusText(trainingState.value.awaiting.stage);
+  } else if (state.awaiting !== null && recorderState.value !== "pending") {
+    statusMessage.value = stageStatusText(state.awaiting.stage);
     recorderState.value = "idle";
-  } else if (trainingState.value.awaiting === null && recorderState.value !== "pending") {
+  } else if (state.awaiting === null && recorderState.value !== "pending") {
     statusMessage.value = "处理中";
   }
-  syncTrainingStatePolling(trainingState.value, {
+  syncTrainingStatePolling(state, {
     start: startTrainingStatePolling,
     stop: stopTrainingStatePolling,
   });
-  return trainingState.value;
 }
 
 async function ensureCurrentAttempt(): Promise<VoiceAttemptResponse> {
@@ -193,6 +295,65 @@ async function ensureCurrentAttempt(): Promise<VoiceAttemptResponse> {
 async function restoreTrainingFlow() {
   await refreshTrainingState();
   await restorePendingUpload();
+}
+
+async function enableNotifications() {
+  clearMessages();
+  if (!accessToken.value) {
+    errorMessage.value = "请先登录";
+    return;
+  }
+  try {
+    notificationStatus.value = notificationStatusText(await setupPushNotifications(accessToken.value));
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "通知订阅失败");
+  }
+}
+
+async function acceptCurrentStrike() {
+  clearMessages();
+  if (!accessToken.value || trainingSession.value === null) {
+    errorMessage.value = "当前没有待接受突击";
+    return;
+  }
+  try {
+    trainingSession.value = await acceptTraining(accessToken.value, trainingSession.value.id);
+    rememberActiveSessionId(trainingSession.value.id);
+    await refreshTrainingState();
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "接受突击失败");
+  }
+}
+
+async function deferCurrentStrike() {
+  clearMessages();
+  if (!accessToken.value || trainingSession.value === null) {
+    errorMessage.value = "当前没有可延期突击";
+    return;
+  }
+  try {
+    await deferTraining(accessToken.value, trainingSession.value.id);
+    clearCurrentTraining("已延期");
+    statusMessage.value = "已延期";
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "延期失败");
+  }
+}
+
+async function abandonCurrentTraining() {
+  clearMessages();
+  if (!accessToken.value || trainingState.value === null) {
+    errorMessage.value = "当前没有可退出训练";
+    return;
+  }
+  try {
+    await abandonTraining(accessToken.value, trainingState.value.id);
+    transcript.value = null;
+    provenance.value = null;
+    clearCurrentTraining("已退出本题");
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "退出失败");
+  }
 }
 
 async function startRecording() {
@@ -397,6 +558,7 @@ async function startNextRecording() {
   duplicateType.value = "other";
   duplicateReason.value = "";
   duplicateComplaint.value = null;
+  forgetActiveSessionId();
   recorderState.value = "idle";
   statusMessage.value = "可开始下一条录音";
   await refreshTrainingState();
@@ -545,9 +707,21 @@ function clearMessages() {
   errorMessage.value = "";
 }
 
+function clearCurrentTraining(message = "等待突击") {
+  trainingSession.value = null;
+  trainingState.value = null;
+  attempt.value = null;
+  forgetActiveSessionId();
+  statusMessage.value = message;
+  recorderState.value = "idle";
+}
+
 function errorToMessage(error: unknown, fallback: string): string {
+  if (isNoCurrentTraining(error)) {
+    return "当前没有待处理突击";
+  }
   if (error instanceof ApiError && error.status === 409) {
-    return "题目准备中，请稍后重试";
+    return "当前状态暂不可执行";
   }
   if (error instanceof Error && error.message) {
     return error.message;
@@ -568,6 +742,44 @@ function stageStatusText(stage: string): string {
   return "等待录音";
 }
 
+function notificationStatusText(result: PushSetupResult): string {
+  if (result === "subscribed") {
+    return "通知已开启";
+  }
+  if (result === "denied") {
+    return "通知权限未开启";
+  }
+  if (result === "unconfigured") {
+    return "通知服务未配置";
+  }
+  return "当前浏览器不支持通知";
+}
+
+function isNoCurrentTraining(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
+function isLiveNotifiedSession(session: TrainingSessionResponse | null): boolean {
+  if (session?.stage !== "NOTIFIED" || session.notification_expires_at === null) {
+    return false;
+  }
+  return Date.parse(session.notification_expires_at) > Date.now();
+}
+
+function emptyTrainingState(): TrainingStateResponse {
+  return {
+    id: "",
+    thread_id: "",
+    stage: "NONE",
+    awaiting: null,
+    current_attempt: null,
+    source_summary: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    completed_at: null,
+  };
+}
+
 function readSessionValue(key: string): string {
   try {
     return globalThis.sessionStorage?.getItem(key) ?? "";
@@ -579,6 +791,14 @@ function readSessionValue(key: string): string {
 function writeSessionValue(key: string, value: string) {
   try {
     globalThis.sessionStorage?.setItem(key, value);
+  } catch {
+    return;
+  }
+}
+
+function removeSessionValue(key: string) {
+  try {
+    globalThis.sessionStorage?.removeItem(key);
   } catch {
     return;
   }
@@ -606,6 +826,32 @@ function removeLocalValue(key: string) {
   } catch {
     return;
   }
+}
+
+function readRestorableSessionId(): string {
+  return restorableSessionIdFromHref(globalThis.location?.href, readLocalValue(ACTIVE_SESSION_KEY));
+}
+
+function rememberActiveSessionId(sessionId: string) {
+  activeSessionId.value = sessionId;
+  writeLocalValue(ACTIVE_SESSION_KEY, sessionId);
+}
+
+function forgetActiveSessionId() {
+  activeSessionId.value = "";
+  removeLocalValue(ACTIVE_SESSION_KEY);
+}
+
+function rememberTokenPair(tokens: TokenPair) {
+  accessToken.value = tokens.access_token;
+  writeSessionValue(ACCESS_TOKEN_KEY, tokens.access_token);
+  writeLocalValue(REFRESH_TOKEN_KEY, tokens.refresh_token);
+}
+
+function forgetAuthTokens() {
+  accessToken.value = "";
+  removeSessionValue(ACCESS_TOKEN_KEY);
+  removeLocalValue(REFRESH_TOKEN_KEY);
 }
 </script>
 
@@ -659,6 +905,12 @@ function removeLocalValue(key: string) {
             {{ remainingSeconds }}s
           </strong>
         </div>
+        <p
+          v-if="notificationStatus"
+          class="inline-status"
+        >
+          {{ notificationStatus }}
+        </p>
 
         <section
           v-if="awaitingInput"
@@ -688,6 +940,26 @@ function removeLocalValue(key: string) {
 
         <div class="controls">
           <button
+            type="button"
+            @click="enableNotifications"
+          >
+            开启通知
+          </button>
+          <button
+            :disabled="!canAcceptStrike"
+            type="button"
+            @click="acceptCurrentStrike"
+          >
+            接受突击
+          </button>
+          <button
+            :disabled="!canDeferStrike"
+            type="button"
+            @click="deferCurrentStrike"
+          >
+            延期
+          </button>
+          <button
             v-if="recorderState !== 'recording'"
             :disabled="!canStartRecording"
             type="button"
@@ -708,6 +980,13 @@ function removeLocalValue(key: string) {
             @click="retryPendingUpload"
           >
             重试上传
+          </button>
+          <button
+            :disabled="!canAbandonTraining"
+            type="button"
+            @click="abandonCurrentTraining"
+          >
+            退出本题
           </button>
           <button
             :disabled="trainingState?.stage !== 'COMPLETED'"

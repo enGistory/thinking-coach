@@ -397,6 +397,72 @@ class SourceQuestionRepository:
         await self._session.flush()
         return row
 
+    async def ready_question_count_for_user(self, user_id: UUID) -> int:
+        active_question_ids = (
+            select(TrainingSession.question_id)
+            .where(
+                TrainingSession.user_id == user_id,
+                TrainingSession.question_id.is_not(None),
+                TrainingSession.stage.not_in(
+                    ("COMPLETED", "EXPIRED", "ABANDONED", "INVALID", "FAILED_RETRYABLE")
+                ),
+            )
+            .subquery()
+        )
+        result = await self._session.execute(
+            select(Question).where(
+                Question.user_id == user_id,
+                Question.status == "READY",
+                Question.exposed_count == 0,
+                Question.id.not_in(select(active_question_ids.c.question_id)),
+            )
+        )
+        count = 0
+        for question in result.scalars().all():
+            template_family = await self._template_family_for_question(question.id)
+            if template_family is None or not await self.template_family_denied(
+                user_id=user_id,
+                template_family=template_family,
+            ):
+                count += 1
+        return count
+
+    async def list_ready_questions_for_user(self, user_id: UUID, limit: int = 20) -> list[Question]:
+        active_question_ids = (
+            select(TrainingSession.question_id)
+            .where(
+                TrainingSession.user_id == user_id,
+                TrainingSession.question_id.is_not(None),
+                TrainingSession.stage.not_in(
+                    ("COMPLETED", "EXPIRED", "ABANDONED", "INVALID", "FAILED_RETRYABLE")
+                ),
+            )
+            .subquery()
+        )
+        result = await self._session.execute(
+            select(Question)
+            .where(
+                Question.user_id == user_id,
+                Question.status == "READY",
+                Question.exposed_count == 0,
+                Question.id.not_in(select(active_question_ids.c.question_id)),
+            )
+            .order_by(Question.ready_at, Question.created_at)
+            .limit(limit)
+        )
+        ready: list[Question] = []
+        for question in result.scalars().all():
+            template_family = await self._template_family_for_question(question.id)
+            if template_family is None or not await self.template_family_denied(
+                user_id=user_id,
+                template_family=template_family,
+            ):
+                ready.append(question)
+            else:
+                question.status = "INVALID"
+        await self._session.flush()
+        return ready
+
     async def claim_ready_question_for_user(self, user_id: UUID) -> Question | None:
         while True:
             result = await self._session.execute(
@@ -405,6 +471,21 @@ class SourceQuestionRepository:
                     Question.user_id == user_id,
                     Question.status == "READY",
                     Question.exposed_count == 0,
+                    Question.id.not_in(
+                        select(TrainingSession.question_id).where(
+                            TrainingSession.user_id == user_id,
+                            TrainingSession.question_id.is_not(None),
+                            TrainingSession.stage.not_in(
+                                (
+                                    "COMPLETED",
+                                    "EXPIRED",
+                                    "ABANDONED",
+                                    "INVALID",
+                                    "FAILED_RETRYABLE",
+                                )
+                            ),
+                        )
+                    ),
                 )
                 .order_by(Question.ready_at, Question.created_at)
                 .with_for_update(skip_locked=True)

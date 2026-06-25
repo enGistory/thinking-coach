@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     langgraph_aes_key: SecretStr | None = None
     web_push_vapid_public_key: str = ""
     web_push_vapid_private_key: SecretStr | None = None
+    web_push_allow_fake_ip_hosts: str = ""
+    strike_notification_ttl_minutes: int = 5
 
     audio_root: Path = Path("/data/audio")
     audio_retention_days: int = 30
@@ -132,6 +134,14 @@ class Settings(BaseSettings):
     @property
     def search_provider_normalized(self) -> str:
         return self.search_provider.strip().lower()
+
+    @property
+    def web_push_fake_ip_host_allowlist(self) -> set[str]:
+        return {
+            host.strip().lower().rstrip(".")
+            for host in self.web_push_allow_fake_ip_hosts.split(",")
+            if host.strip()
+        }
 
     def validate_ai(self) -> None:
         """Validate AI startup configuration without exposing secret values."""
@@ -218,6 +228,33 @@ class Settings(BaseSettings):
             raise ConfigurationError(
                 "SEARCH_COUNT_INVALID",
                 "BOCHA_SEARCH_COUNT must be between 1 and 50",
+            )
+
+    def validate_push(self) -> None:
+        if not self.web_push_vapid_public_key.strip():
+            raise ConfigurationError(
+                "WEB_PUSH_PUBLIC_KEY_MISSING",
+                "WEB_PUSH_VAPID_PUBLIC_KEY must be configured",
+            )
+        if not self._secret_has_value(self.web_push_vapid_private_key):
+            raise ConfigurationError(
+                "WEB_PUSH_PRIVATE_KEY_MISSING",
+                "WEB_PUSH_VAPID_PRIVATE_KEY must be configured",
+            )
+        if self.strike_notification_ttl_minutes < 1 or self.strike_notification_ttl_minutes > 60:
+            raise ConfigurationError(
+                "STRIKE_NOTIFICATION_TTL_INVALID",
+                "STRIKE_NOTIFICATION_TTL_MINUTES must be between 1 and 60",
+            )
+        invalid_allowlist_hosts = [
+            host
+            for host in self.web_push_fake_ip_host_allowlist
+            if "/" in host or ":" in host or host == "localhost" or host.endswith(".local")
+        ]
+        if invalid_allowlist_hosts:
+            raise ConfigurationError(
+                "WEB_PUSH_FAKE_IP_ALLOWLIST_INVALID",
+                "WEB_PUSH_ALLOW_FAKE_IP_HOSTS must contain exact public hostnames",
             )
 
     def _missing_aliyun_settings(self) -> list[str]:

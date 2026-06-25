@@ -47,7 +47,7 @@ from app.main import create_app
 from app.repositories.auth import UserRepository
 from app.repositories.jobs import PREPARE_QUESTIONS_JOB, AIJobRepository
 from app.services.source_questions import SourceQuestionService
-from tests.helpers_source_questions import seed_ready_question
+from tests.helpers_source_questions import seed_exposed_training_session
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -339,23 +339,22 @@ async def test_prepare_questions_dedupes_repeated_final_fetched_url(
     assert question_count == 8
 
 
-async def test_current_without_ready_question_enqueues_prepare_job(
+async def test_current_without_visible_session_does_not_enqueue_prepare_job(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],
 ) -> None:
     await _create_user(db_maker, nickname="waiting")
     token = await _login(client, "waiting")
 
-    response = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
+    response = await client.get("/api/v1/trainings/current", headers=_auth_headers(token))
 
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "QUESTION_NOT_READY"
-    assert response.json()["error"]["job_id"]
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NO_CURRENT_TRAINING"
     async with db_maker() as session:
         job_count = await session.scalar(
             select(func.count()).select_from(AIJob).where(AIJob.job_type == PREPARE_QUESTIONS_JOB)
         )
-    assert job_count == 1
+    assert job_count == 0
 
 
 async def test_prepare_question_enqueue_reuses_active_but_starts_new_after_terminal(
@@ -390,12 +389,9 @@ async def test_state_hides_sources_until_completed_and_then_returns_provenance(
     user_id = await _create_user(db_maker, nickname="provenance")
     token = await _login(client, "provenance")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(token))
-    assert current.status_code == 200
-    session_id = current.json()["id"]
 
     state = await client.get(
         f"/api/v1/trainings/{session_id}/state",
@@ -435,15 +431,11 @@ async def test_provenance_rejects_other_users_completed_session(
 ) -> None:
     owner_id = await _create_user(db_maker, nickname="source-owner")
     await _create_user(db_maker, nickname="source-intruder")
-    owner_token = await _login(client, "source-owner")
     intruder_token = await _login(client, "source-intruder")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=owner_id)
+        training_session = await seed_exposed_training_session(session, user_id=owner_id)
+        session_id = str(training_session.id)
         await session.commit()
-
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(owner_token))
-    assert current.status_code == 200
-    session_id = current.json()["id"]
 
     async with db_maker() as session:
         training = await session.get(TrainingSession, UUID(session_id))

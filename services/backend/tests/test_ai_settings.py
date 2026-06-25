@@ -179,3 +179,68 @@ def test_auth_accepts_configured_jwt_secret() -> None:
     )
 
     settings.validate_auth()
+
+
+def test_push_requires_vapid_keypair() -> None:
+    settings = Settings(
+        _env_file=None,
+        web_push_vapid_public_key="",
+        web_push_vapid_private_key=None,
+    )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        settings.validate_push()
+
+    assert exc_info.value.code == "WEB_PUSH_PUBLIC_KEY_MISSING"
+
+
+def test_push_accepts_configured_vapid_keypair() -> None:
+    settings = Settings(
+        _env_file=None,
+        web_push_vapid_public_key="test-public-key",
+        web_push_vapid_private_key=SecretStr("test-private-key"),
+        strike_notification_ttl_minutes=5,
+    )
+
+    settings.validate_push()
+
+
+def test_push_fake_ip_allowlist_normalizes_exact_hosts() -> None:
+    settings = Settings(
+        _env_file=None,
+        web_push_vapid_public_key="test-public-key",
+        web_push_vapid_private_key=SecretStr("test-private-key"),
+        web_push_allow_fake_ip_hosts=" FCM.GoogleApis.com. , updates.push.services.mozilla.com ",
+        strike_notification_ttl_minutes=5,
+    )
+
+    settings.validate_push()
+
+    assert settings.web_push_fake_ip_host_allowlist == {
+        "fcm.googleapis.com",
+        "updates.push.services.mozilla.com",
+    }
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",
+        "push.local",
+        "https://fcm.googleapis.com",
+        "fcm.googleapis.com:443",
+    ],
+)
+def test_push_fake_ip_allowlist_rejects_non_exact_public_hosts(host: str) -> None:
+    settings = Settings(
+        _env_file=None,
+        web_push_vapid_public_key="test-public-key",
+        web_push_vapid_private_key=SecretStr("test-private-key"),
+        web_push_allow_fake_ip_hosts=host,
+        strike_notification_ttl_minutes=5,
+    )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        settings.validate_push()
+
+    assert exc_info.value.code == "WEB_PUSH_FAKE_IP_ALLOWLIST_INVALID"

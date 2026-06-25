@@ -15,6 +15,19 @@ export function shouldFetchTrainingProvenance(state: TrainingStateResponse): boo
   return state.stage === "COMPLETED" && state.source_summary !== null;
 }
 
+export function shouldRestoreStoredTrainingState(state: TrainingStateResponse): boolean {
+  return state.stage === "COMPLETED";
+}
+
+export function restorableSessionIdFromHref(href: string | undefined, storedSessionId: string): string {
+  try {
+    const sessionId = new URL(href ?? "").searchParams.get("session");
+    return sessionId || storedSessionId;
+  } catch {
+    return storedSessionId;
+  }
+}
+
 export function syncTrainingStatePolling(
   state: TrainingStateResponse,
   controls: TrainingStatePollingControls,

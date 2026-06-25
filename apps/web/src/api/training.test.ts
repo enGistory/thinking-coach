@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  abandonTraining,
+  acceptTraining,
   createDuplicateComplaint,
   createVoiceAttempt,
+  deferTraining,
   fetchAttemptTranscript,
+  fetchCurrentTraining,
   fetchTrainingProvenance,
   fetchTrainingState,
   resumeTraining,
@@ -18,6 +22,44 @@ interface FetchCall {
 describe("training API", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("fetches the current visible training session with bearer auth", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(JSON.stringify(trainingSessionResponse("NOTIFIED")), { status: 200 });
+    });
+
+    const response = await fetchCurrentTraining("token-1");
+
+    expect(response.stage).toBe("NOTIFIED");
+    expect(calls[0]?.input).toBe("/api/v1/trainings/current");
+    expect(calls[0]?.init?.headers).toEqual({ Authorization: "Bearer token-1" });
+  });
+
+  it("submits random strike accept, defer, and abandon commands with bearer auth", async () => {
+    const calls: FetchCall[] = [];
+    const stages = ["WAIT_FIRST_AUDIO", "SCHEDULED", "ABANDONED"];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      const stage = stages.shift() ?? "NOTIFIED";
+      return new Response(JSON.stringify(trainingSessionResponse(stage)), { status: 200 });
+    });
+
+    await acceptTraining("token-1", "session-1");
+    await deferTraining("token-1", "session-1");
+    await abandonTraining("token-1", "session-1");
+
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/v1/trainings/session-1/accept",
+      "/api/v1/trainings/session-1/defer",
+      "/api/v1/trainings/session-1/abandon",
+    ]);
+    expect(calls.map((call) => call.init?.method)).toEqual(["POST", "POST", "POST"]);
+    for (const call of calls) {
+      expect(call.init?.headers).toEqual({ Authorization: "Bearer token-1" });
+    }
   });
 
   it("creates a voice attempt for the requested slot with bearer auth", async () => {
@@ -288,3 +330,15 @@ describe("training API", () => {
     expect(calls[0]?.init?.headers).toEqual({ Authorization: "Bearer token-1" });
   });
 });
+
+function trainingSessionResponse(stage: string) {
+  return {
+    id: "session-1",
+    thread_id: "thread-1",
+    stage,
+    scheduled_at: "2026-06-24T01:00:00Z",
+    notification_expires_at: stage === "NOTIFIED" ? "2026-06-24T01:05:00Z" : null,
+    accepted_at: stage === "WAIT_FIRST_AUDIO" ? "2026-06-24T01:01:00Z" : null,
+    created_at: "2026-06-24T00:55:00Z",
+  };
+}

@@ -14,7 +14,9 @@ from app.db.models import (
     QuestionSource,
     SourceBundle,
     SourceClaim,
+    TrainingSession,
 )
+from app.repositories.trainings import TrainingRepository
 
 
 async def seed_ready_question(
@@ -22,7 +24,7 @@ async def seed_ready_question(
     *,
     user_id: UUID,
     question_id: UUID | None = None,
-    prompt: str = "请基于材料说明你的判断、证据缺口和下一步。",
+    prompt: str = "已知事实: 团队没有更新成功标准。请说明你的判断、证据缺口和下一步。",
 ) -> Question:
     if question_id is not None:
         existing = await session.get(Question, question_id)
@@ -67,7 +69,7 @@ async def seed_ready_question(
 
     claim = SourceClaim(
         source_id=source.id,
-        claim_text="材料显示团队没有更新成功标准。",
+        claim_text="团队没有更新成功标准。",
         locator="paragraph 1",
         excerpt="团队没有更新成功标准",
         support_status="VERIFIED",
@@ -110,7 +112,7 @@ async def seed_ready_question(
             claim_id=claim.id,
             usage_type="fact",
             sentence_index=0,
-            sentence_text="材料显示团队没有更新成功标准。",
+            sentence_text="团队没有更新成功标准。",
         )
     )
     session.add(
@@ -126,3 +128,29 @@ async def seed_ready_question(
     )
     await session.flush()
     return question
+
+
+async def seed_exposed_training_session(
+    session: AsyncSession,
+    *,
+    user_id: UUID,
+    question_id: UUID | None = None,
+    prompt: str = "已知事实: 团队没有更新成功标准。请说明你的判断、证据缺口和下一步。",
+) -> TrainingSession:
+    question = await seed_ready_question(
+        session,
+        user_id=user_id,
+        question_id=question_id,
+        prompt=prompt,
+    )
+    training_session = await TrainingRepository(session).create_audio_session_for_question(
+        user_id=user_id,
+        question_id=question.id,
+    )
+    now = datetime.now(UTC)
+    training_session.accepted_at = now
+    training_session.exposed_at = now
+    question.status = "EXPOSED"
+    question.exposed_count = max(question.exposed_count, 1)
+    await session.flush()
+    return training_session

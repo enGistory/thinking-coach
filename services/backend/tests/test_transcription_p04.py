@@ -42,7 +42,7 @@ from app.services import transcription as transcription_module
 from app.services.audio_access import AudioAccessError, TranscriptionAudioAccess
 from app.services.transcription import TranscriptionService
 from app.workers import main as worker_module
-from tests.helpers_source_questions import seed_ready_question
+from tests.helpers_source_questions import seed_exposed_training_session
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -120,10 +120,10 @@ async def test_upload_creates_pending_transcript_without_transcription_job(
     )
     access_token = await _login(client, "first", "first-password")
     async with db_maker() as session:
-        await seed_ready_question(session, user_id=user_id)
+        training_session = await seed_exposed_training_session(session, user_id=user_id)
+        session_id = str(training_session.id)
         await session.commit()
-    current = await client.post("/api/v1/trainings/current", headers=_auth_headers(access_token))
-    session_id = current.json()["id"]
+
     attempt = await client.post(
         f"/api/v1/trainings/{session_id}/attempts",
         headers=_auth_headers(access_token),

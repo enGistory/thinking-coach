@@ -6,6 +6,9 @@ export interface TrainingSessionResponse {
   id: string;
   thread_id: string;
   stage: string;
+  scheduled_at: string;
+  notification_expires_at: string | null;
+  accepted_at: string | null;
   created_at: string;
 }
 
@@ -142,8 +145,37 @@ export interface DuplicateComplaintResponse {
   created_at: string;
 }
 
-export async function createCurrentTraining(accessToken: string): Promise<TrainingSessionResponse> {
+export async function fetchCurrentTraining(accessToken: string): Promise<TrainingSessionResponse> {
   return requestJson<TrainingSessionResponse>("/api/v1/trainings/current", {
+    headers: authHeaders(accessToken),
+  });
+}
+
+export async function acceptTraining(
+  accessToken: string,
+  sessionId: string,
+): Promise<TrainingSessionResponse> {
+  return requestJson<TrainingSessionResponse>(`/api/v1/trainings/${sessionId}/accept`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+}
+
+export async function deferTraining(
+  accessToken: string,
+  sessionId: string,
+): Promise<TrainingSessionResponse> {
+  return requestJson<TrainingSessionResponse>(`/api/v1/trainings/${sessionId}/defer`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+}
+
+export async function abandonTraining(
+  accessToken: string,
+  sessionId: string,
+): Promise<TrainingSessionResponse> {
+  return requestJson<TrainingSessionResponse>(`/api/v1/trainings/${sessionId}/abandon`, {
     method: "POST",
     headers: authHeaders(accessToken),
   });

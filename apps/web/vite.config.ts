@@ -9,6 +9,7 @@ export default defineConfig({
     vue(),
     VitePWA({
       registerType: "autoUpdate",
+      injectRegister: "auto",
       manifest: {
         name: "Thinking Coach",
         short_name: "Coach",
@@ -28,6 +29,10 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: "/index.html",
+        importScripts: ["/push-handler.js"],
+      },
+      devOptions: {
+        enabled: true,
       },
     }),
   ],

@@ -16,6 +16,9 @@ class TrainingSessionResponse(BaseModel):
     id: UUID
     thread_id: str
     stage: str
+    scheduled_at: datetime
+    notification_expires_at: datetime | None = None
+    accepted_at: datetime | None = None
     created_at: datetime
 
 

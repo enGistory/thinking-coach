@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { TrainingStateResponse } from "./api/training";
 import {
+  restorableSessionIdFromHref,
   shouldContinueTrainingStatePolling,
   shouldFetchTrainingProvenance,
+  shouldRestoreStoredTrainingState,
   syncTrainingStatePolling,
 } from "./trainingFlow";
 
@@ -72,6 +74,20 @@ describe("training flow state polling", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("uses notification URL session id before a stored session id", () => {
+    expect(restorableSessionIdFromHref("http://localhost:5182/?session=session-from-url", "stored")).toBe(
+      "session-from-url",
+    );
+    expect(restorableSessionIdFromHref("http://localhost:5182/", "stored")).toBe("stored");
+    expect(restorableSessionIdFromHref("not a url", "stored")).toBe("stored");
+  });
+
+  it("restores only completed stored sessions after current session lookup misses", () => {
+    expect(shouldRestoreStoredTrainingState(trainingState("COMPLETED"))).toBe(true);
+    expect(shouldRestoreStoredTrainingState(trainingState("WAIT_FIRST_AUDIO"))).toBe(false);
+    expect(shouldRestoreStoredTrainingState(trainingState("EXPIRED"))).toBe(false);
   });
 });
 

@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -108,6 +109,38 @@ class UserTrainingPolicy(Base):
     daily_max: Mapped[int] = mapped_column(Integer, nullable=False)
     retention_days: Mapped[int] = mapped_column(Integer, nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class PushSubscription(Base):
+    __tablename__ = "push_subscription"
+    __table_args__ = (
+        UniqueConstraint("endpoint", name="uq_push_subscription_endpoint"),
+        Index("ix_push_subscription_user_active", "user_id", "active"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    p256dh: Mapped[str] = mapped_column(Text, nullable=False)
+    auth: Mapped[str] = mapped_column(Text, nullable=False)
+    user_agent: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -478,6 +511,17 @@ class TrainingSession(Base):
             ")",
             name="ck_training_session_stage",
         ),
+        Index("ix_training_session_user_stage", "user_id", "stage"),
+        Index(
+            "uq_training_session_user_active",
+            "user_id",
+            unique=True,
+            postgresql_where=text(
+                "stage NOT IN ('COMPLETED', 'EXPIRED', 'ABANDONED', 'INVALID', 'FAILED_RETRYABLE')"
+            ),
+        ),
+        Index("ix_training_session_stage_scheduled", "stage", "scheduled_at"),
+        Index("ix_training_session_notification_expires", "stage", "notification_expires_at"),
     )
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -498,8 +542,22 @@ class TrainingSession(Base):
         nullable=False,
         server_default=func.now(),
     )
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notification_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     exposed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivery_decision_json: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    deferred_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    push_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    push_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
