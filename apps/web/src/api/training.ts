@@ -145,6 +145,89 @@ export interface DuplicateComplaintResponse {
   created_at: string;
 }
 
+export type AppealType = "transcript" | "source" | "evaluation" | "defect_classification";
+export type AppealStatus = "OPEN" | "REVIEWED_ACCEPTED" | "REVIEWED_REJECTED";
+
+export interface AppealRequest {
+  type: AppealType;
+  reason: string;
+  issue_id?: string | null;
+  defect_code?: string | null;
+  attempt_id?: string | null;
+  segment_id?: string | null;
+  source_id?: string | null;
+  claim_id?: string | null;
+}
+
+export interface AppealResponse {
+  id: string;
+  session_id: string;
+  issue_id: string | null;
+  defect_code: string | null;
+  type: AppealType;
+  target: Record<string, unknown>;
+  status: AppealStatus;
+  reason: string;
+  resolution: string | null;
+  created_at: string;
+}
+
+export interface TrainingAppealStatusResponse {
+  id: string;
+  type: AppealType | "duplicate_question";
+  status: AppealStatus | "ACCEPTED";
+  target: Record<string, unknown>;
+  reason: string;
+  resolution: string | null;
+  created_at: string;
+}
+
+export interface ReportIssueResponse {
+  id: string;
+  attempt_id: string;
+  attempt_stage: string;
+  transcript_segment_id: string | null;
+  category: "logic" | "speech" | "adaptability";
+  code: string;
+  severity: number;
+  confidence: "low" | "medium" | "high";
+  quote: string;
+  start_ms: number;
+  end_ms: number;
+  explanation: string;
+  missing_information: string[];
+  correction_rule: string;
+}
+
+export interface SimilarDefectResponse {
+  id: string;
+  session_id: string;
+  issue_id: string;
+  defect_code: string;
+  quote: string;
+  start_ms: number;
+  end_ms: number;
+  created_at: string;
+}
+
+export interface TrainingReportResponse {
+  session_id: string;
+  report_id: string;
+  stage: string;
+  evaluated_at: string;
+  rubric_version: string;
+  total_score: number;
+  logic_score: number;
+  expression_score: number;
+  adaptability_score: number;
+  confidence: string;
+  summary: string;
+  source_summary: SourceSummaryResponse | null;
+  issues: ReportIssueResponse[];
+  similar_defects: SimilarDefectResponse[];
+  appeals: TrainingAppealStatusResponse[];
+}
+
 export async function fetchCurrentTraining(accessToken: string): Promise<TrainingSessionResponse> {
   return requestJson<TrainingSessionResponse>("/api/v1/trainings/current", {
     headers: authHeaders(accessToken),
@@ -288,6 +371,39 @@ export async function createDuplicateComplaint(
       body: JSON.stringify(payload),
     },
   );
+}
+
+export async function fetchTrainingReport(
+  accessToken: string,
+  sessionId: string,
+): Promise<TrainingReportResponse> {
+  return requestJson<TrainingReportResponse>(`/api/v1/trainings/${sessionId}/report`, {
+    headers: authHeaders(accessToken),
+  });
+}
+
+export async function fetchTrainingAppeals(
+  accessToken: string,
+  sessionId: string,
+): Promise<TrainingAppealStatusResponse[]> {
+  return requestJson<TrainingAppealStatusResponse[]>(`/api/v1/trainings/${sessionId}/appeals`, {
+    headers: authHeaders(accessToken),
+  });
+}
+
+export async function createTrainingAppeal(
+  accessToken: string,
+  sessionId: string,
+  payload: AppealRequest,
+): Promise<AppealResponse> {
+  return requestJson<AppealResponse>(`/api/v1/trainings/${sessionId}/appeals`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 }
 
 function preferredFilename(mimeType: string): string {

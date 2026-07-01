@@ -2,6 +2,9 @@
 .env.*
 !.env.example
 secrets/
+infra/env.production
+infra/certs/
+backups/
 *.pem
 *.key
 /data/

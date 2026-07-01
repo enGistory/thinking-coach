@@ -13,6 +13,7 @@ GRAPH_RESUME_JOB = "GRAPH_RESUME"
 TRANSCRIBE_ATTEMPT_JOB = "TRANSCRIBE_ATTEMPT"
 EVALUATE_SESSION_JOB = "EVALUATE_SESSION"
 PREPARE_QUESTIONS_JOB = "PREPARE_QUESTIONS"
+DELETE_ACCOUNT_JOB = "DELETE_ACCOUNT"
 AI_JOB_LEASE_SECONDS = 30 * 60
 AI_JOB_MAX_RETRIES = 2
 TRANSCRIBE_JOB_LEASE_SECONDS = AI_JOB_LEASE_SECONDS
@@ -35,6 +36,10 @@ def evaluation_idempotency_key(session_id: UUID) -> str:
 
 def prepare_questions_idempotency_key(user_id: UUID) -> str:
     return f"prepare_questions:{user_id}"
+
+
+def delete_account_idempotency_key(request_id: UUID) -> str:
+    return f"delete_account:{request_id}"
 
 
 class AIJobRepository:
@@ -133,6 +138,24 @@ class AIJobRepository:
         if new_job is None:
             raise RuntimeError("question preparation job upsert did not return a row")
         return new_job
+
+    async def enqueue_delete_account(self, *, request_id: UUID) -> AIJob:
+        idempotency_key = delete_account_idempotency_key(request_id)
+        statement = (
+            insert(AIJob)
+            .values(
+                job_type=DELETE_ACCOUNT_JOB,
+                payload={"request_id": str(request_id)},
+                status="PENDING",
+                idempotency_key=idempotency_key,
+            )
+            .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        )
+        await self._session.execute(statement)
+        job = await self.get_by_idempotency_key(idempotency_key)
+        if job is None:
+            raise RuntimeError("delete account job upsert did not return a row")
+        return job
 
     async def get_prepare_questions_job(self, *, user_id: UUID) -> AIJob | None:
         return await self.get_by_idempotency_key(prepare_questions_idempotency_key(user_id))

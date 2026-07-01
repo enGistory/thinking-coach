@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -889,7 +890,7 @@ class Appeal(Base):
     __tablename__ = "appeal"
     __table_args__ = (
         CheckConstraint(
-            "type IN ('evaluation', 'defect_classification')",
+            "type IN ('transcript', 'source', 'evaluation', 'defect_classification')",
             name="ck_appeal_type",
         ),
         CheckConstraint(
@@ -921,6 +922,7 @@ class Appeal(Base):
         nullable=True,
     )
     type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="OPEN")
     resolution: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1099,6 +1101,36 @@ class DefectProfile(Base):
     )
 
 
+class WeeklyReport(Base):
+    __tablename__ = "weekly_report"
+    __table_args__ = (
+        UniqueConstraint("user_id", "week_start", name="uq_weekly_report_user_week"),
+        Index("ix_weekly_report_user_week", "user_id", "week_start"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("app_user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    week_start: Mapped[date] = mapped_column(Date, nullable=False)
+    week_end: Mapped[date] = mapped_column(Date, nullable=False)
+    metrics_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class AIJob(Base):
     __tablename__ = "ai_job"
     __table_args__ = (
@@ -1126,6 +1158,56 @@ class AIJob(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class PrivacyDeletionRequest(Base):
+    __tablename__ = "privacy_deletion_request"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')",
+            name="ck_privacy_deletion_request_status",
+        ),
+        Index("ix_privacy_deletion_request_user", "user_id_snapshot"),
+        Index("ix_privacy_deletion_request_status", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id_snapshot: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    user_id_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    proof_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="QUEUED")
+    counts_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PrivacyAuditEvent(Base):
+    __tablename__ = "privacy_audit_event"
+    __table_args__ = (
+        Index("ix_privacy_audit_event_user", "user_id_snapshot"),
+        Index("ix_privacy_audit_event_request", "request_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id_snapshot: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    request_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    counts_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 

@@ -10,6 +10,24 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.request_id import REQUEST_ID_HEADER, get_request_id
 
+_SENSITIVE_ERROR_DETAIL_KEY_PARTS = (
+    "apikey",
+    "accesskey",
+    "authorization",
+    "audio",
+    "bocha",
+    "cookie",
+    "dashscope",
+    "jwt",
+    "password",
+    "proof",
+    "secret",
+    "signature",
+    "signedurl",
+    "token",
+    "vapid",
+)
+
 
 def error_payload(code: str, message: str, request: Request) -> dict[str, dict[str, object]]:
     return {
@@ -67,8 +85,17 @@ def _http_error_payload(request: Request, detail: object) -> dict[str, dict[str,
             request,
         )
         for key, value in detail.items():
-            if key not in {"code", "message"} and isinstance(value, str | int | float | bool):
+            if (
+                key not in {"code", "message"}
+                and _is_safe_error_detail_key(str(key))
+                and isinstance(value, str | int | float | bool)
+            ):
                 payload["error"][str(key)] = value
         return payload
     message = str(detail) if detail else "Request failed"
     return error_payload("HTTP_ERROR", message, request)
+
+
+def _is_safe_error_detail_key(key: str) -> bool:
+    normalized = "".join(char for char in key.lower() if char.isalnum())
+    return not any(part in normalized for part in _SENSITIVE_ERROR_DETAIL_KEY_PARTS)

@@ -196,7 +196,10 @@ class RandomStrikeService:
             raise RandomStrikeError("TRAINING_NOTIFICATION_EXPIRED")
         if training_session.question_id is None:
             raise RandomStrikeError("TRAINING_QUESTION_MISSING")
-        question = await self._source_repo.get_question(training_session.question_id)
+        question = await self._source_repo.get_question(
+            training_session.question_id,
+            user_id=training_session.user_id,
+        )
         if question is None or question.status != "READY" or question.exposed_count != 0:
             training_session.stage = "INVALID"
             raise RandomStrikeError("TRAINING_QUESTION_NOT_READY")

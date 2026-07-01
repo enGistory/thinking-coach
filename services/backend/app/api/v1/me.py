@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,14 @@ from app.repositories.defects import DefectMemoryRepository, DefectOccurrenceRow
 from app.repositories.training_policy import TrainingPolicyRepository
 from app.schemas.auth import TrainingPolicyPayload, TrainingPolicyResponse
 from app.schemas.defects import DefectOccurrenceResponse, DefectProfileResponse
+from app.schemas.privacy import (
+    AccountDeletionResponse,
+    PersonalDataExportResponse,
+    TrainingDeletionResponse,
+)
+from app.schemas.reports import WeeklyReportResponse
+from app.services.privacy import PrivacyError, PrivacyService
+from app.services.reports import ReportService
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"])
 
@@ -75,6 +84,67 @@ async def list_defect_occurrences(
         defect_code=defect_code,
     )
     return [_occurrence_response(row) for row in rows]
+
+
+@router.get("/weekly-reports", response_model=list[WeeklyReportResponse])
+async def list_weekly_reports(
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[WeeklyReportResponse]:
+    return await ReportService(session=session).weekly_reports(user_id=current_user.id)
+
+
+@router.get("/export", response_model=PersonalDataExportResponse)
+async def export_personal_data(
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PersonalDataExportResponse:
+    return await PrivacyService(session=session, settings=get_settings()).export_personal_data(
+        user=current_user,
+    )
+
+
+@router.delete("/trainings/{session_id}", response_model=TrainingDeletionResponse)
+async def delete_training(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TrainingDeletionResponse:
+    try:
+        result = await PrivacyService(
+            session=session,
+            settings=get_settings(),
+        ).delete_training(user_id=current_user.id, session_id=session_id)
+    except PrivacyError as exc:
+        http_status = (
+            status.HTTP_404_NOT_FOUND
+            if exc.code == "TRAINING_NOT_FOUND"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=http_status, detail=exc.code) from exc
+    await session.commit()
+    return result
+
+
+@router.delete("", response_model=AccountDeletionResponse)
+async def delete_account(
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> AccountDeletionResponse:
+    try:
+        result = await PrivacyService(
+            session=session,
+            settings=get_settings(),
+        ).request_account_deletion(user=current_user)
+    except PrivacyError as exc:
+        http_status = (
+            status.HTTP_403_FORBIDDEN
+            if exc.code == "ADMIN_ACCOUNT_DELETE_FORBIDDEN"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=http_status, detail=exc.code) from exc
+    await session.commit()
+    return result
 
 
 def _policy_response(policy: UserTrainingPolicy) -> TrainingPolicyResponse:

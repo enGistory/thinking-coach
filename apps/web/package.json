@@ -9,7 +9,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint .",
     "type-check": "vue-tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "scan-dist-secrets": "node scripts/scan-dist-secrets.mjs"
   },
   "dependencies": {
     "pinia": "^3.0.1",

@@ -30,6 +30,7 @@ class DefectMemoryService:
         reason: str,
         issue_id: UUID | None,
         defect_code: str | None,
+        target_json: dict[str, object] | None = None,
     ) -> Appeal:
         appeal = await self._repository.create_appeal(
             user_id=user_id,
@@ -38,10 +39,17 @@ class DefectMemoryService:
             reason=reason,
             issue_id=issue_id,
             defect_code=defect_code,
+            target_json=target_json,
         )
         if appeal is None:
             raise DefectMemoryError("DEFECT_APPEAL_TARGET_NOT_FOUND")
         return appeal
+
+    async def list_session_appeals(self, *, user_id: UUID, session_id: UUID) -> list[Appeal]:
+        return await self._repository.list_session_appeals(user_id=user_id, session_id=session_id)
+
+    async def list_admin_appeals(self, *, limit: int = 100) -> list[Appeal]:
+        return await self._repository.list_appeals_for_admin(limit=limit)
 
     async def review_appeal(
         self,

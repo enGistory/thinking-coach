@@ -206,7 +206,10 @@ h1 {
 }
 
 .transcript,
-.provenance {
+.provenance,
+.report,
+.weekly,
+.privacy-status {
   display: grid;
   gap: 12px;
   border-top: 1px solid #e4eaee;

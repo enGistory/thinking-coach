@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-AppealType = Literal["evaluation", "defect_classification"]
+AppealType = Literal["transcript", "source", "evaluation", "defect_classification"]
 AppealStatus = Literal["OPEN", "REVIEWED_ACCEPTED", "REVIEWED_REJECTED"]
 DefectProfileState = Literal[
     "observed",
@@ -57,9 +57,25 @@ class AppealRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
     issue_id: UUID | None = None
     defect_code: str | None = Field(default=None, max_length=64)
+    attempt_id: UUID | None = None
+    segment_id: UUID | None = None
+    source_id: UUID | None = None
+    claim_id: UUID | None = None
 
     @model_validator(mode="after")
     def require_target(self) -> AppealRequest:
+        if self.type in {"evaluation", "defect_classification"}:
+            if self.issue_id is None and self.defect_code is None:
+                raise ValueError("issue_id or defect_code is required")
+            return self
+        if self.type == "transcript":
+            if self.attempt_id is None and self.segment_id is None:
+                raise ValueError("attempt_id or segment_id is required")
+            return self
+        if self.type == "source":
+            if self.source_id is None and self.claim_id is None:
+                raise ValueError("source_id or claim_id is required")
+            return self
         if self.issue_id is None and self.defect_code is None:
             raise ValueError("issue_id or defect_code is required")
         return self
@@ -87,7 +103,26 @@ class AppealResponse(BaseModel):
     issue_id: UUID | None
     defect_code: str | None
     type: AppealType
+    target: dict[str, object]
     status: AppealStatus
     reason: str
     resolution: str | None
     created_at: datetime
+
+
+class AdminAppealResponse(AppealResponse):
+    user_id: UUID
+    reviewed_at: datetime | None
+
+
+class AppealReviewRequest(BaseModel):
+    accepted: bool
+    resolution: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("resolution")
+    @classmethod
+    def strip_resolution(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("resolution must not be blank")
+        return stripped

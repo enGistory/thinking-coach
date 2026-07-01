@@ -17,7 +17,11 @@ from app.db.models import (
     DefectProfile,
     EvaluationIssue,
     EvaluationReport,
+    Question,
+    QuestionSource,
+    SourceClaim,
     TrainingSession,
+    TranscriptSegment,
     VoiceAttempt,
 )
 from app.domain.defects import (
@@ -176,10 +180,54 @@ class DefectMemoryRepository:
         reason: str,
         issue_id: UUID | None,
         defect_code: str | None,
+        target_json: dict[str, object] | None = None,
     ) -> Appeal | None:
         training_session = await self._owned_session(user_id=user_id, session_id=session_id)
         if training_session is None:
             return None
+
+        target = target_json or {}
+        if appeal_type == "transcript":
+            if not await self._transcript_target_exists(
+                session_id=training_session.id,
+                attempt_id=_target_uuid(target, "attempt_id"),
+                segment_id=_target_uuid(target, "segment_id"),
+            ):
+                return None
+            appeal = Appeal(
+                user_id=user_id,
+                session_id=training_session.id,
+                issue_id=None,
+                defect_code=None,
+                type=appeal_type,
+                target_json=target,
+                reason=reason,
+                status="OPEN",
+            )
+            self._session.add(appeal)
+            await self._session.flush()
+            return appeal
+
+        if appeal_type == "source":
+            if not await self._source_target_exists(
+                training_session=training_session,
+                source_id=_target_uuid(target, "source_id"),
+                claim_id=_target_uuid(target, "claim_id"),
+            ):
+                return None
+            appeal = Appeal(
+                user_id=user_id,
+                session_id=training_session.id,
+                issue_id=None,
+                defect_code=None,
+                type=appeal_type,
+                target_json=target,
+                reason=reason,
+                status="OPEN",
+            )
+            self._session.add(appeal)
+            await self._session.flush()
+            return appeal
 
         normalized_code: str | None = None
         if defect_code is not None:
@@ -205,12 +253,15 @@ class DefectMemoryRepository:
         if not appealable_occurrences:
             return None
 
+        target.setdefault("issue_id", str(issue_id) if issue_id is not None else None)
+        target.setdefault("defect_code", normalized_code)
         appeal = Appeal(
             user_id=user_id,
             session_id=training_session.id,
             issue_id=issue_id,
             defect_code=normalized_code,
             type=appeal_type,
+            target_json=target,
             reason=reason,
             status="OPEN",
         )
@@ -257,10 +308,41 @@ class DefectMemoryRepository:
         appeal.status = "REVIEWED_ACCEPTED" if accepted else "REVIEWED_REJECTED"
         appeal.resolution = resolution
         appeal.reviewed_at = datetime.now(UTC)
+        if accepted and appeal.type in {"transcript", "source"}:
+            await self._invalidate_session_reports(
+                session_id=appeal.session_id,
+                error_code=f"{appeal.type.upper()}_APPEAL_ACCEPTED",
+            )
+            affected_codes.update(
+                await self.exclude_session_occurrences(
+                    user_id=appeal.user_id,
+                    session_id=appeal.session_id,
+                )
+            )
         for code in sorted(affected_codes):
             await self.rebuild_profile(user_id=user_id, defect_code=code)
         await self._session.flush()
         return appeal
+
+    async def list_session_appeals(self, *, user_id: UUID, session_id: UUID) -> list[Appeal]:
+        training_session = await self._owned_session(user_id=user_id, session_id=session_id)
+        if training_session is None:
+            return []
+        result = await self._session.execute(
+            select(Appeal)
+            .where(Appeal.user_id == user_id, Appeal.session_id == session_id)
+            .order_by(Appeal.created_at.desc(), Appeal.id.desc())
+        )
+        return list(result.scalars().all())
+
+    async def list_appeals_for_admin(self, *, limit: int = 100) -> list[Appeal]:
+        result = await self._session.execute(
+            select(Appeal)
+            .where(Appeal.status == "OPEN")
+            .order_by(Appeal.created_at.desc(), Appeal.id.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
     async def exclude_session_occurrences(self, *, user_id: UUID, session_id: UUID) -> list[str]:
         result = await self._session.execute(
@@ -459,6 +541,81 @@ class DefectMemoryRepository:
         )
         return list(result.scalars().all())
 
+    async def _transcript_target_exists(
+        self,
+        *,
+        session_id: UUID,
+        attempt_id: UUID | None,
+        segment_id: UUID | None,
+    ) -> bool:
+        if attempt_id is not None:
+            attempt_result = await self._session.execute(
+                select(VoiceAttempt.id).where(
+                    VoiceAttempt.id == attempt_id,
+                    VoiceAttempt.session_id == session_id,
+                )
+            )
+            if attempt_result.scalar_one_or_none() is not None:
+                return True
+        if segment_id is None:
+            return False
+        segment_result = await self._session.execute(
+            select(TranscriptSegment.id)
+            .join(VoiceAttempt, VoiceAttempt.id == TranscriptSegment.attempt_id)
+            .where(
+                TranscriptSegment.id == segment_id,
+                VoiceAttempt.session_id == session_id,
+            )
+        )
+        return segment_result.scalar_one_or_none() is not None
+
+    async def _source_target_exists(
+        self,
+        *,
+        training_session: TrainingSession,
+        source_id: UUID | None,
+        claim_id: UUID | None,
+    ) -> bool:
+        if training_session.question_id is None:
+            return False
+        question_result = await self._session.execute(
+            select(Question).where(
+                Question.id == training_session.question_id,
+                Question.user_id == training_session.user_id,
+            )
+        )
+        question = question_result.scalar_one_or_none()
+        if question is None:
+            return False
+        if source_id is not None:
+            source_result = await self._session.execute(
+                select(QuestionSource.id).where(
+                    QuestionSource.id == source_id,
+                    QuestionSource.source_bundle_id == question.source_bundle_id,
+                )
+            )
+            if source_result.scalar_one_or_none() is not None:
+                return True
+        if claim_id is None:
+            return False
+        claim_result = await self._session.execute(
+            select(SourceClaim.id)
+            .join(QuestionSource, QuestionSource.id == SourceClaim.source_id)
+            .where(
+                SourceClaim.id == claim_id,
+                QuestionSource.source_bundle_id == question.source_bundle_id,
+            )
+        )
+        return claim_result.scalar_one_or_none() is not None
+
+    async def _invalidate_session_reports(self, *, session_id: UUID, error_code: str) -> None:
+        result = await self._session.execute(
+            select(EvaluationReport).where(EvaluationReport.session_id == session_id)
+        )
+        for report in result.scalars().all():
+            report.status = "INVALID"
+            report.error_code = error_code
+
 
 def _scenario_key(training_session: TrainingSession) -> str:
     if training_session.question_id is not None:
@@ -485,3 +642,15 @@ def _similarity_reasons(
     if not reasons:
         reasons.add("same_defect_code")
     return sorted(reasons)
+
+
+def _target_uuid(target: dict[str, object], key: str) -> UUID | None:
+    value = target.get(key)
+    if isinstance(value, UUID):
+        return value
+    if isinstance(value, str):
+        try:
+            return UUID(value)
+        except ValueError:
+            return None
+    return None

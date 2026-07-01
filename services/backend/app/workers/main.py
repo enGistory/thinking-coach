@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,7 @@ from app.graphs.voice_training import (
     resume_voice_training,
 )
 from app.repositories.jobs import (
+    DELETE_ACCOUNT_JOB,
     EVALUATE_SESSION_JOB,
     GRAPH_RESUME_JOB,
     PREPARE_QUESTIONS_JOB,
@@ -24,10 +26,12 @@ from app.repositories.jobs import (
 )
 from app.repositories.transcripts import TranscriptRepository
 from app.services.evaluation import EvaluationService
+from app.services.privacy import PrivacyService
 from app.services.source_questions import SourceQuestionService
 from app.services.transcription import TranscriptionService
 
 POLL_SECONDS = 1.0
+_SAFE_ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 ADVANCED_SESSION_STAGES_BY_RESUME_STAGE = {
     "FIRST": {
         "PROCESS_FOLLOWUP",
@@ -57,7 +61,9 @@ async def run_worker() -> None:
     settings.validate_ai()
     bundle = create_provider_bundle(settings)
     while True:
-        processed = await run_prepare_questions_job_once(bundle=bundle)
+        processed = await run_delete_account_job_once()
+        if not processed:
+            processed = await run_prepare_questions_job_once(bundle=bundle)
         if not processed:
             processed = await run_graph_resume_job_once(bundle=bundle)
         if not processed:
@@ -239,6 +245,44 @@ async def run_transcription_job_once(*, stt_provider: STTProvider) -> bool:
     return True
 
 
+async def run_delete_account_job_once() -> bool:
+    settings = get_settings()
+    maker = get_sessionmaker()
+    async with maker() as session:
+        job_repo = AIJobRepository(session)
+        job = await job_repo.claim_next(DELETE_ACCOUNT_JOB)
+        if job is None:
+            await session.rollback()
+            return False
+        job_id = job.id
+        payload = job.payload
+        await session.commit()
+
+    request_id: UUID | None = None
+    try:
+        request_id = _uuid_from_payload(payload, "request_id")
+        async with maker() as session:
+            await PrivacyService(session=session, settings=settings).process_account_deletion(
+                request_id=request_id,
+            )
+            await session.commit()
+        await _mark_job_succeeded(job_id)
+    except Exception as exc:
+        error_code = _error_code(exc)
+        async with maker() as session:
+            if request_id is not None:
+                await PrivacyService(session=session, settings=settings).mark_deletion_failed(
+                    request_id=request_id,
+                    error_code=error_code,
+                )
+            job_repo = AIJobRepository(session)
+            job = await job_repo.get_by_id(job_id)
+            if job is not None:
+                await job_repo.mark_retryable_failure(job, error_code)
+            await session.commit()
+    return True
+
+
 def _attempt_id_from_payload(payload: dict[str, object]) -> UUID:
     return _uuid_from_payload(payload, "attempt_id")
 
@@ -311,7 +355,12 @@ async def _graph_resume_already_applied(
 
 def _error_code(exc: Exception) -> str:
     code = getattr(exc, "code", None) or getattr(exc, "error_code", None)
-    return code if isinstance(code, str) and code else exc.__class__.__name__.upper()
+    if isinstance(code, str) and _SAFE_ERROR_CODE_RE.fullmatch(code):
+        return code
+    class_name_code = exc.__class__.__name__.upper()
+    if _SAFE_ERROR_CODE_RE.fullmatch(class_name_code):
+        return class_name_code
+    return "UNHANDLED_ERROR"
 
 
 def main() -> None:

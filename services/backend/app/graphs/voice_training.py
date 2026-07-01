@@ -415,7 +415,8 @@ async def _question_text_for_session(
         return None
     async with deps.sessionmaker() as session:
         question = await SourceQuestionRepository(session).get_question(
-            training_session.question_id
+            training_session.question_id,
+            user_id=training_session.user_id,
         )
         return question.prompt if question is not None else None
 

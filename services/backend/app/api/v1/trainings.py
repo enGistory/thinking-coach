@@ -7,13 +7,21 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 
 from app.ai.providers.factory import create_provider_bundle
 from app.api.dependencies import get_current_user
 from app.core.config import Settings, get_settings
-from app.db.models import AppUser, SourceBundle, TrainingSession, VoiceAttempt
+from app.db.models import (
+    Appeal,
+    AppUser,
+    QuestionDuplicateComplaint,
+    SourceBundle,
+    TrainingSession,
+    VoiceAttempt,
+)
 from app.db.session import get_session, get_sessionmaker
 from app.graphs.voice_training import (
     DEV_QUESTION_TEXT,
@@ -34,6 +42,7 @@ from app.repositories.transcripts import (
     TranscriptRepository,
 )
 from app.schemas.defects import AppealRequest, AppealResponse
+from app.schemas.reports import TrainingAppealStatusResponse, TrainingReportResponse
 from app.schemas.source_question import (
     DuplicateComplaintRequest,
     DuplicateComplaintResponse,
@@ -68,6 +77,7 @@ from app.services.defects import DefectMemoryError, DefectMemoryService
 from app.services.push import PyWebPushSender
 from app.services.question_duplicates import DuplicateQuestionError, DuplicateQuestionService
 from app.services.random_strike import RandomStrikeError, RandomStrikeService
+from app.services.reports import ReportService
 
 router = APIRouter(prefix="/api/v1", tags=["trainings"])
 
@@ -300,6 +310,21 @@ async def get_training_provenance(
     )
 
 
+@router.get("/trainings/{session_id}/report", response_model=TrainingReportResponse)
+async def get_training_report(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> TrainingReportResponse:
+    report = await ReportService(session=session).training_report(
+        user_id=current_user.id,
+        session_id=session_id,
+    )
+    if report is None:
+        raise _not_found()
+    return report
+
+
 @router.post(
     "/trainings/{session_id}/resume",
     response_model=ResumeTrainingResponse,
@@ -502,6 +527,7 @@ async def create_training_appeal(
             reason=payload.reason,
             issue_id=payload.issue_id,
             defect_code=payload.defect_code,
+            target_json=_appeal_target_json(payload),
         )
     except DefectMemoryError as exc:
         raise HTTPException(
@@ -509,17 +535,40 @@ async def create_training_appeal(
             detail=exc.code,
         ) from exc
     await session.commit()
-    return AppealResponse(
-        id=appeal.id,
-        session_id=appeal.session_id,
-        issue_id=appeal.issue_id,
-        defect_code=appeal.defect_code,
-        type=appeal.type,
-        status=appeal.status,
-        reason=appeal.reason,
-        resolution=appeal.resolution,
-        created_at=appeal.created_at,
+    return _appeal_response(appeal)
+
+
+@router.get(
+    "/trainings/{session_id}/appeals",
+    response_model=list[TrainingAppealStatusResponse],
+)
+async def list_training_appeals(
+    session_id: UUID,
+    current_user: Annotated[AppUser, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[TrainingAppealStatusResponse]:
+    training_session = await TrainingRepository(session).get_owned_session(
+        session_id=session_id,
+        user_id=current_user.id,
     )
+    if training_session is None:
+        raise _not_found()
+    appeals = await DefectMemoryService(session=session).list_session_appeals(
+        user_id=current_user.id,
+        session_id=session_id,
+    )
+    duplicate_result = await session.execute(
+        select(QuestionDuplicateComplaint)
+        .where(
+            QuestionDuplicateComplaint.user_id == current_user.id,
+            QuestionDuplicateComplaint.session_id == session_id,
+        )
+        .order_by(QuestionDuplicateComplaint.created_at.desc())
+    )
+    return [_appeal_status_response(appeal) for appeal in appeals] + [
+        _duplicate_complaint_status_response(complaint)
+        for complaint in duplicate_result.scalars().all()
+    ]
 
 
 @router.post(
@@ -555,6 +604,66 @@ async def create_duplicate_complaint(
         status="ACCEPTED",
         replacement_job_id=result.replacement_job.id,
         created_at=result.complaint.created_at,
+    )
+
+
+def _appeal_target_json(payload: AppealRequest) -> dict[str, object]:
+    target: dict[str, object] = {}
+    for key in ("issue_id", "attempt_id", "segment_id", "source_id", "claim_id"):
+        value = getattr(payload, key)
+        if value is not None:
+            target[key] = str(value)
+    if payload.defect_code is not None:
+        target["defect_code"] = payload.defect_code
+    return target
+
+
+def _appeal_response(appeal: Appeal) -> AppealResponse:
+    return AppealResponse(
+        id=appeal.id,
+        session_id=appeal.session_id,
+        issue_id=appeal.issue_id,
+        defect_code=appeal.defect_code,
+        type=appeal.type,
+        target=appeal.target_json,
+        status=appeal.status,
+        reason=appeal.reason,
+        resolution=appeal.resolution,
+        created_at=appeal.created_at,
+    )
+
+
+def _appeal_status_response(appeal: Appeal) -> TrainingAppealStatusResponse:
+    return TrainingAppealStatusResponse(
+        id=appeal.id,
+        type=appeal.type,
+        status=appeal.status,
+        target=appeal.target_json,
+        reason=appeal.reason,
+        resolution=appeal.resolution,
+        created_at=appeal.created_at,
+    )
+
+
+def _duplicate_complaint_status_response(
+    complaint: QuestionDuplicateComplaint,
+) -> TrainingAppealStatusResponse:
+    return TrainingAppealStatusResponse(
+        id=complaint.id,
+        type="duplicate_question",
+        status=complaint.status,
+        target={
+            "question_id": str(complaint.question_id),
+            "similar_question_id": (
+                str(complaint.similar_question_id)
+                if complaint.similar_question_id is not None
+                else None
+            ),
+            "duplicate_type": complaint.duplicate_type,
+        },
+        reason=complaint.reason,
+        resolution="DUPLICATE_QUESTION_ACCEPTED",
+        created_at=complaint.created_at,
     )
 
 
@@ -649,20 +758,30 @@ async def _training_state_response(
     )
 
 
-async def _question_text(session: AsyncSession, question_id: UUID | None) -> str | None:
+async def _question_text(
+    session: AsyncSession,
+    *,
+    question_id: UUID | None,
+    user_id: UUID,
+) -> str | None:
     if question_id is None:
         return None
-    question = await SourceQuestionRepository(session).get_question(question_id)
+    question = await SourceQuestionRepository(session).get_question(question_id, user_id=user_id)
     return question.prompt if question is not None else None
 
 
 async def _source_summary_response(
     session: AsyncSession,
+    *,
     question_id: UUID | None,
+    user_id: UUID,
 ) -> SourceSummaryResponse | None:
     if question_id is None:
         return None
-    bundle = await SourceQuestionRepository(session).get_source_bundle_for_question(question_id)
+    bundle = await SourceQuestionRepository(session).get_source_bundle_for_question(
+        question_id,
+        user_id=user_id,
+    )
     return _source_summary_from_bundle(bundle) if bundle is not None else None
 
 
@@ -672,7 +791,11 @@ async def _visible_source_summary_response(
 ) -> SourceSummaryResponse | None:
     if training_session.stage in {"SCHEDULED", "NOTIFIED", "EXPIRED"}:
         return None
-    return await _source_summary_response(session, training_session.question_id)
+    return await _source_summary_response(
+        session,
+        question_id=training_session.question_id,
+        user_id=training_session.user_id,
+    )
 
 
 def _source_summary_from_bundle(bundle: SourceBundle) -> SourceSummaryResponse:
@@ -690,7 +813,11 @@ async def _awaiting_input_response(
 ) -> TrainingAwaitingInputResponse | None:
     session_stage = training_session.stage
     if session_stage in {"ACCEPTED", "QUESTION_EXPOSED", "WAIT_FIRST_AUDIO"}:
-        question_text = await _question_text(session, training_session.question_id)
+        question_text = await _question_text(
+            session,
+            question_id=training_session.question_id,
+            user_id=training_session.user_id,
+        )
         return TrainingAwaitingInputResponse(
             type="FIRST_ANSWER",
             stage="FIRST",

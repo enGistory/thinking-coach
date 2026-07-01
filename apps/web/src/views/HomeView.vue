@@ -7,24 +7,40 @@ import {
   abandonTraining,
   acceptTraining,
   createDuplicateComplaint,
+  createTrainingAppeal,
   deferTraining,
   fetchCurrentTraining,
   createVoiceAttempt,
   fetchAttemptAudio,
   fetchAttemptTranscript,
+  fetchTrainingAppeals,
   fetchTrainingProvenance,
+  fetchTrainingReport,
   fetchTrainingState,
   resumeTraining,
   uploadAttemptAudio,
+  type AppealType,
   type AttemptTranscriptResponse,
   type DuplicateComplaintResponse,
   type DuplicateType,
+  type TrainingAppealStatusResponse,
   type TrainingProvenanceResponse,
+  type TrainingReportResponse,
   type TranscriptSegmentResponse,
   type TrainingSessionResponse,
   type TrainingStateResponse,
   type VoiceAttemptResponse,
 } from "../api/training";
+import {
+  deleteAccount,
+  deleteTraining,
+  exportPersonalData,
+  fetchDeletionStatus,
+  fetchWeeklyReports,
+  type AccountDeletionResponse,
+  type DeletionStatusResponse,
+  type WeeklyReportResponse,
+} from "../api/privacy";
 import { sha256Hex } from "../audio/checksum";
 import { seekPlaybackToSegment, type SeekablePlayback } from "../audio/playbackSeek";
 import {
@@ -41,6 +57,7 @@ import {
   loadPendingAudio,
   savePendingAudioBestEffort,
   deletePendingAudioBestEffort,
+  clearPendingAudioBestEffort,
   type PendingAudioRecord,
 } from "../audio/pendingAudioStore";
 import {
@@ -53,6 +70,13 @@ import {
 import { setupPushNotifications, type PushSetupResult } from "../pushNotifications";
 
 type RecorderState = "idle" | "recording" | "uploading" | "pending" | "uploaded";
+type AppealTargetKind = "issue" | "defect" | "segment" | "source" | "claim";
+
+interface AppealTargetOption {
+  kind: AppealTargetKind;
+  value: string;
+  label: string;
+}
 
 const ACCESS_TOKEN_KEY = "thinkingCoachAccessToken";
 const REFRESH_TOKEN_KEY = "thinkingCoachRefreshToken";
@@ -73,10 +97,22 @@ const remainingSeconds = ref(MAX_AUDIO_SECONDS);
 const playbackUrl = ref("");
 const transcript = ref<AttemptTranscriptResponse | null>(null);
 const provenance = ref<TrainingProvenanceResponse | null>(null);
+const trainingReport = ref<TrainingReportResponse | null>(null);
+const trainingAppeals = ref<TrainingAppealStatusResponse[]>([]);
+const weeklyReports = ref<WeeklyReportResponse[]>([]);
 const duplicateType = ref<DuplicateType>("other");
 const duplicateReason = ref("");
 const duplicateComplaint = ref<DuplicateComplaintResponse | null>(null);
 const duplicateSubmitting = ref(false);
+const appealType = ref<AppealType>("evaluation");
+const appealTargetValue = ref("");
+const appealReason = ref("");
+const appealSubmitting = ref(false);
+const privacyBusy = ref(false);
+const accountDeletion = ref<AccountDeletionResponse | null>(null);
+const deletionStatusRequestId = ref("");
+const deletionStatusProof = ref("");
+const deletionStatus = ref<DeletionStatusResponse | null>(null);
 const activeSessionId = ref(readRestorableSessionId());
 const pendingAttemptId = ref(readLocalValue(PENDING_ATTEMPT_KEY));
 const playbackAudio = ref<SeekablePlayback | null>(null);
@@ -110,6 +146,55 @@ const canSubmitDuplicateComplaint = computed(
     duplicateComplaint.value === null &&
     !duplicateSubmitting.value,
 );
+const canSubmitAppeal = computed(
+  () =>
+    trainingState.value?.stage === "COMPLETED" &&
+    selectedAppealTarget.value !== null &&
+    appealReason.value.trim().length > 0 &&
+    !appealSubmitting.value,
+);
+const appealTargetOptions = computed<AppealTargetOption[]>(() => {
+  if (appealType.value === "evaluation") {
+    return (trainingReport.value?.issues ?? []).map((issue) => ({
+      kind: "issue",
+      value: issue.id,
+      label: `${issue.category} / ${issue.code} / ${issue.quote}`,
+    }));
+  }
+  if (appealType.value === "defect_classification") {
+    return (trainingReport.value?.issues ?? []).map((issue) => ({
+      kind: "defect",
+      value: issue.code,
+      label: `${issue.code} / ${issue.quote}`,
+    }));
+  }
+  if (appealType.value === "transcript") {
+    return (transcript.value?.segments ?? []).map((segment) => ({
+      kind: "segment",
+      value: segment.id,
+      label: `${(segment.start_ms / 1000).toFixed(1)}s / ${segment.corrected_text}`,
+    }));
+  }
+  return (provenance.value?.sources ?? []).flatMap((source) => [
+    {
+      kind: "source" as const,
+      value: source.id,
+      label: `${source.publisher} / ${source.title}`,
+    },
+    ...source.claims.map((claim) => ({
+      kind: "claim" as const,
+      value: claim.id,
+      label: `${claim.locator} / ${claim.excerpt}`,
+    })),
+  ]);
+});
+const selectedAppealTarget = computed(() => {
+  return (
+    appealTargetOptions.value.find((option) => option.value === appealTargetValue.value) ??
+    appealTargetOptions.value[0] ??
+    null
+  );
+});
 
 let mediaRecorder: MediaRecorder | null = null;
 let mediaStream: MediaStream | null = null;
@@ -256,6 +341,7 @@ async function applyTrainingStateStatus(
     } else {
       provenance.value = null;
     }
+    await loadReportAndAppeals(state.id);
   } else if (state.awaiting !== null && recorderState.value !== "pending") {
     statusMessage.value = stageStatusText(state.awaiting.stage);
     recorderState.value = "idle";
@@ -294,6 +380,7 @@ async function ensureCurrentAttempt(): Promise<VoiceAttemptResponse> {
 
 async function restoreTrainingFlow() {
   await refreshTrainingState();
+  await loadWeeklyReports();
   await restorePendingUpload();
 }
 
@@ -515,15 +602,45 @@ async function loadProvenance(sessionId: string) {
   provenance.value = await fetchTrainingProvenance(accessToken.value, sessionId);
 }
 
+async function loadReportAndAppeals(sessionId: string) {
+  if (!accessToken.value) {
+    return;
+  }
+  try {
+    trainingReport.value = await fetchTrainingReport(accessToken.value, sessionId);
+    trainingAppeals.value = trainingReport.value.appeals;
+  } catch (error) {
+    if (!isNoCurrentTraining(error)) {
+      errorMessage.value = errorToMessage(error, "读取报告失败");
+    }
+  }
+  try {
+    trainingAppeals.value = await fetchTrainingAppeals(accessToken.value, sessionId);
+  } catch {
+    return;
+  }
+}
+
+async function loadWeeklyReports() {
+  if (!accessToken.value) {
+    return;
+  }
+  try {
+    weeklyReports.value = await fetchWeeklyReports(accessToken.value);
+  } catch {
+    weeklyReports.value = [];
+  }
+}
+
 async function submitDuplicateComplaint() {
   clearMessages();
   if (!accessToken.value || trainingState.value?.stage !== "COMPLETED") {
-    errorMessage.value = "Completed session required";
+    errorMessage.value = "需要已完成的训练";
     return;
   }
   const reason = duplicateReason.value.trim();
   if (!reason) {
-    errorMessage.value = "Reason required";
+    errorMessage.value = "请填写原因";
     return;
   }
 
@@ -537,11 +654,141 @@ async function submitDuplicateComplaint() {
         duplicate_type: duplicateType.value,
       },
     );
-    statusMessage.value = "Duplicate complaint accepted";
+    statusMessage.value = "重复投诉已受理";
   } catch (error) {
-    errorMessage.value = errorToMessage(error, "Duplicate complaint failed");
+    errorMessage.value = errorToMessage(error, "重复投诉失败");
   } finally {
     duplicateSubmitting.value = false;
+  }
+}
+
+async function submitTrainingAppeal() {
+  clearMessages();
+  if (!accessToken.value || trainingState.value?.stage !== "COMPLETED") {
+    errorMessage.value = "需要已完成的训练";
+    return;
+  }
+  const target = selectedAppealTarget.value;
+  if (target === null) {
+    errorMessage.value = "请选择申诉对象";
+    return;
+  }
+  const reason = appealReason.value.trim();
+  if (!reason) {
+    errorMessage.value = "请填写原因";
+    return;
+  }
+
+  appealSubmitting.value = true;
+  try {
+    await createTrainingAppeal(accessToken.value, trainingState.value.id, {
+      type: appealType.value,
+      reason,
+      issue_id: target.kind === "issue" ? target.value : null,
+      defect_code: target.kind === "defect" ? target.value : null,
+      segment_id: target.kind === "segment" ? target.value : null,
+      source_id: target.kind === "source" ? target.value : null,
+      claim_id: target.kind === "claim" ? target.value : null,
+    });
+    appealReason.value = "";
+    trainingAppeals.value = await fetchTrainingAppeals(accessToken.value, trainingState.value.id);
+    statusMessage.value = "申诉已提交";
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "提交申诉失败");
+  } finally {
+    appealSubmitting.value = false;
+  }
+}
+
+async function downloadPersonalData() {
+  clearMessages();
+  if (!accessToken.value) {
+    errorMessage.value = "请先登录";
+    return;
+  }
+  privacyBusy.value = true;
+  try {
+    const payload = await exportPersonalData(accessToken.value);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = globalThis.document.createElement("a");
+    link.href = url;
+    link.download = `thinking-coach-export-${payload.generated_at.slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    statusMessage.value = "导出文件已生成";
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "导出失败");
+  } finally {
+    privacyBusy.value = false;
+  }
+}
+
+async function deleteCurrentTraining() {
+  clearMessages();
+  if (!accessToken.value || !trainingState.value?.id) {
+    errorMessage.value = "当前没有可删除的训练";
+    return;
+  }
+  if (!globalThis.confirm("删除本次训练及其音频、转写和报告数据？")) {
+    return;
+  }
+  privacyBusy.value = true;
+  try {
+    await deleteTraining(accessToken.value, trainingState.value.id);
+    await forgetAllPendingAudio();
+    transcript.value = null;
+    provenance.value = null;
+    trainingReport.value = null;
+    trainingAppeals.value = [];
+    clearCurrentTraining("本次训练已删除");
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "删除训练失败");
+  } finally {
+    privacyBusy.value = false;
+  }
+}
+
+async function requestAccountDeletion() {
+  clearMessages();
+  if (!accessToken.value) {
+    errorMessage.value = "请先登录";
+    return;
+  }
+  if (!globalThis.confirm("禁用账号并排队删除全部个人数据？")) {
+    return;
+  }
+  privacyBusy.value = true;
+  try {
+    accountDeletion.value = await deleteAccount(accessToken.value);
+    deletionStatusRequestId.value = accountDeletion.value.request_id;
+    deletionStatusProof.value = accountDeletion.value.proof_code;
+    await forgetAllPendingAudio();
+    forgetAuthTokens();
+    clearCurrentTraining("账号删除已排队");
+    statusMessage.value = "账号删除已排队";
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "删除账号失败");
+  } finally {
+    privacyBusy.value = false;
+  }
+}
+
+async function checkDeletionStatus() {
+  clearMessages();
+  if (!deletionStatusRequestId.value || !deletionStatusProof.value) {
+    errorMessage.value = "请填写请求 ID 和证明码";
+    return;
+  }
+  try {
+    deletionStatus.value = await fetchDeletionStatus(
+      deletionStatusRequestId.value,
+      deletionStatusProof.value,
+    );
+  } catch (error) {
+    errorMessage.value = errorToMessage(error, "查询删除进度失败");
   }
 }
 
@@ -555,6 +802,8 @@ async function startNextRecording() {
   attempt.value = null;
   transcript.value = null;
   provenance.value = null;
+  trainingReport.value = null;
+  trainingAppeals.value = [];
   duplicateType.value = "other";
   duplicateReason.value = "";
   duplicateComplaint.value = null;
@@ -597,6 +846,16 @@ async function forgetPendingRecord(attemptId: string) {
     return;
   }
   await deletePendingAudioBestEffort(attemptId);
+}
+
+async function forgetAllPendingAudio() {
+  pendingAttemptId.value = "";
+  removeLocalValue(PENDING_ATTEMPT_KEY);
+  inMemoryPendingRecord = null;
+  if (!isPendingAudioStoreAvailable()) {
+    return;
+  }
+  await clearPendingAudioBestEffort();
 }
 
 function startRecordingTimers() {
@@ -711,6 +970,10 @@ function clearCurrentTraining(message = "等待突击") {
   trainingSession.value = null;
   trainingState.value = null;
   attempt.value = null;
+  transcript.value = null;
+  provenance.value = null;
+  trainingReport.value = null;
+  trainingAppeals.value = [];
   forgetActiveSessionId();
   statusMessage.value = message;
   recorderState.value = "idle";
@@ -753,6 +1016,54 @@ function notificationStatusText(result: PushSetupResult): string {
     return "通知服务未配置";
   }
   return "当前浏览器不支持通知";
+}
+
+function appealTypeText(type: string): string {
+  if (type === "evaluation") {
+    return "评审";
+  }
+  if (type === "defect_classification") {
+    return "缺陷分类";
+  }
+  if (type === "transcript") {
+    return "转写";
+  }
+  if (type === "source") {
+    return "来源";
+  }
+  if (type === "duplicate") {
+    return "重复题";
+  }
+  return type;
+}
+
+function appealStatusText(status: string): string {
+  if (status === "OPEN") {
+    return "待处理";
+  }
+  if (status === "ACCEPTED") {
+    return "已接受";
+  }
+  if (status === "REJECTED") {
+    return "已驳回";
+  }
+  return status;
+}
+
+function deletionStatusText(status: string | null | undefined): string {
+  if (status === "QUEUED") {
+    return "已排队";
+  }
+  if (status === "RUNNING") {
+    return "删除中";
+  }
+  if (status === "SUCCEEDED") {
+    return "已完成";
+  }
+  if (status === "FAILED") {
+    return "失败";
+  }
+  return "等待处理";
 }
 
 function isNoCurrentTraining(error: unknown): boolean {
@@ -924,15 +1235,15 @@ function forgetAuthTokens() {
             class="source-summary"
           >
             <div>
-              <dt>sources</dt>
+              <dt>来源数</dt>
               <dd>{{ trainingState.source_summary.source_count }}</dd>
             </div>
             <div>
-              <dt>level</dt>
+              <dt>等级</dt>
               <dd>{{ trainingState.source_summary.highest_source_level ?? "—" }}</dd>
             </div>
             <div>
-              <dt>credential</dt>
+              <dt>凭证</dt>
               <dd>{{ trainingState.source_summary.credential }}</dd>
             </div>
           </dl>
@@ -995,6 +1306,33 @@ function forgetAuthTokens() {
           >
             下一条
           </button>
+          <button
+            type="button"
+            @click="loadWeeklyReports"
+          >
+            刷新周报
+          </button>
+          <button
+            :disabled="privacyBusy"
+            type="button"
+            @click="downloadPersonalData"
+          >
+            导出数据
+          </button>
+          <button
+            :disabled="privacyBusy || !trainingState?.id"
+            type="button"
+            @click="deleteCurrentTraining"
+          >
+            删除本次训练
+          </button>
+          <button
+            :disabled="privacyBusy"
+            type="button"
+            @click="requestAccountDeletion"
+          >
+            删除账号
+          </button>
         </div>
 
         <dl
@@ -1002,15 +1340,15 @@ function forgetAuthTokens() {
           class="meta"
         >
           <div v-if="trainingSession">
-            <dt>session</dt>
+            <dt>会话</dt>
             <dd>{{ trainingSession.id }}</dd>
           </div>
           <div v-if="attempt">
-            <dt>attempt</dt>
+            <dt>回答</dt>
             <dd>{{ attempt.id }}</dd>
           </div>
           <div v-if="attempt">
-            <dt>status</dt>
+            <dt>状态</dt>
             <dd>{{ attempt.upload_status }}</dd>
           </div>
         </dl>
@@ -1066,6 +1404,107 @@ function forgetAuthTokens() {
         </section>
 
         <section
+          v-if="trainingReport"
+          class="report"
+          aria-labelledby="report-title"
+        >
+          <div class="transcript-header">
+            <h2 id="report-title">
+              本次报告
+            </h2>
+            <span>{{ trainingReport.total_score }}</span>
+          </div>
+          <dl class="metric-grid">
+            <div>
+              <dt>逻辑</dt>
+              <dd>{{ trainingReport.logic_score }}</dd>
+            </div>
+            <div>
+              <dt>口语</dt>
+              <dd>{{ trainingReport.expression_score }}</dd>
+            </div>
+            <div>
+              <dt>应变</dt>
+              <dd>{{ trainingReport.adaptability_score }}</dd>
+            </div>
+          </dl>
+          <p class="inline-status">
+            {{ trainingReport.summary }}
+          </p>
+          <div class="source-list">
+            <article
+              v-for="issue in trainingReport.issues"
+              :key="issue.id"
+            >
+              <strong>{{ issue.category }} / {{ issue.code }}</strong>
+              <span>{{ issue.quote }} ({{ (issue.start_ms / 1000).toFixed(1) }}s)</span>
+              <span>{{ issue.explanation }}</span>
+            </article>
+          </div>
+          <form
+            class="duplicate-form"
+            @submit.prevent="submitTrainingAppeal"
+          >
+            <label>
+              <span>申诉类型</span>
+              <select v-model="appealType">
+                <option value="evaluation">
+                  评审误解
+                </option>
+                <option value="defect_classification">
+                  缺陷分类
+                </option>
+                <option value="transcript">
+                  转写错误
+                </option>
+                <option value="source">
+                  来源错误
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>申诉对象</span>
+              <select v-model="appealTargetValue">
+                <option
+                  v-for="option in appealTargetOptions"
+                  :key="`${option.kind}:${option.value}`"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>原因</span>
+              <textarea
+                v-model="appealReason"
+                maxlength="1000"
+                rows="3"
+              />
+            </label>
+            <button
+              :disabled="!canSubmitAppeal"
+              type="submit"
+            >
+              提交申诉
+            </button>
+          </form>
+          <div
+            v-if="trainingAppeals.length"
+            class="source-list"
+          >
+            <article
+              v-for="appeal in trainingAppeals"
+              :key="appeal.id"
+            >
+              <strong>{{ appealTypeText(appeal.type) }} / {{ appealStatusText(appeal.status) }}</strong>
+              <span>{{ appeal.reason }}</span>
+              <span v-if="appeal.resolution">{{ appeal.resolution }}</span>
+            </article>
+          </div>
+        </section>
+
+        <section
           v-if="provenance"
           class="provenance"
           aria-labelledby="provenance-title"
@@ -1103,36 +1542,36 @@ function forgetAuthTokens() {
             @submit.prevent="submitDuplicateComplaint"
           >
             <label>
-              <span>Duplicate type</span>
+              <span>重复类型</span>
               <select v-model="duplicateType">
                 <option value="other">
-                  Other
+                  其他
                 </option>
                 <option value="text">
-                  Text
+                  原题重复
                 </option>
                 <option value="semantic">
-                  Semantic
+                  语义重复
                 </option>
                 <option value="parameter">
-                  Parameter skin
+                  数字换皮
                 </option>
                 <option value="role">
-                  Role skin
+                  角色换皮
                 </option>
                 <option value="structure">
-                  Structure
+                  结构换皮
                 </option>
                 <option value="answer_skeleton">
-                  Answer skeleton
+                  答案骨架重复
                 </option>
                 <option value="same_event">
-                  Same event
+                  同一事件
                 </option>
               </select>
             </label>
             <label>
-              <span>Reason</span>
+              <span>原因</span>
               <textarea
                 v-model="duplicateReason"
                 maxlength="1000"
@@ -1143,14 +1582,88 @@ function forgetAuthTokens() {
               :disabled="!canSubmitDuplicateComplaint"
               type="submit"
             >
-              Report duplicate
+              提交重复投诉
             </button>
             <p
               v-if="duplicateComplaint"
               class="inline-status"
             >
-              Accepted, replacement job {{ duplicateComplaint.replacement_job_id }}
+              已受理，补题任务 {{ duplicateComplaint.replacement_job_id }}
             </p>
+          </form>
+        </section>
+
+        <section
+          v-if="weeklyReports.length"
+          class="weekly"
+          aria-labelledby="weekly-title"
+        >
+          <div class="transcript-header">
+            <h2 id="weekly-title">
+              周报
+            </h2>
+            <span>{{ weeklyReports[0]?.week_start }} - {{ weeklyReports[0]?.week_end }}</span>
+          </div>
+          <div class="source-list">
+            <article
+              v-for="report in weeklyReports"
+              :key="report.id"
+            >
+              <strong>{{ report.week_start }} - {{ report.week_end }}</strong>
+              <span>{{ report.summary }}</span>
+              <span>完成训练 {{ report.metrics.completed_session_count ?? 0 }}</span>
+            </article>
+          </div>
+        </section>
+
+        <section
+          v-if="accountDeletion || deletionStatusRequestId"
+          class="privacy-status"
+          aria-labelledby="privacy-title"
+        >
+          <div class="transcript-header">
+            <h2 id="privacy-title">
+              删除进度
+            </h2>
+            <span>{{ deletionStatusText(deletionStatus?.status ?? accountDeletion?.status) }}</span>
+          </div>
+          <dl
+            v-if="accountDeletion"
+            class="meta"
+          >
+            <div>
+              <dt>请求</dt>
+              <dd>{{ accountDeletion.request_id }}</dd>
+            </div>
+            <div>
+              <dt>证明码</dt>
+              <dd>{{ accountDeletion.proof_code }}</dd>
+            </div>
+          </dl>
+          <form
+            class="duplicate-form"
+            @submit.prevent="checkDeletionStatus"
+          >
+            <label>
+              <span>请求 ID</span>
+              <input
+                v-model="deletionStatusRequestId"
+                autocomplete="off"
+                spellcheck="false"
+              >
+            </label>
+            <label>
+              <span>证明码</span>
+              <input
+                v-model="deletionStatusProof"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+              >
+            </label>
+            <button type="submit">
+              查询进度
+            </button>
           </form>
         </section>
       </div>

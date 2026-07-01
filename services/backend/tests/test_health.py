@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -127,6 +127,47 @@ def test_framework_http_errors_preserve_protocol_headers() -> None:
     assert response.headers["allow"] == "GET"
     assert response.headers["X-Request-ID"] == "req-method"
     assert response.json()["error"]["code"] == "HTTP_ERROR"
+
+
+def test_http_error_detail_extras_do_not_echo_sensitive_fields() -> None:
+    router = APIRouter()
+
+    @router.get("/sensitive-error")
+    def sensitive_error() -> None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SENSITIVE_TEST",
+                "message": "Safe failure",
+                "retry_after": 30,
+                "proof_code": "proof-should-not-print",
+                "refresh_token": "refresh-should-not-print",
+                "audio_path": "user/session/private.webm",
+                "signed_url": "https://storage.example/signature-secret",
+                "Authorization": "Bearer token-should-not-print",
+            },
+        )
+
+    app = create_app()
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/sensitive-error", headers={"X-Request-ID": "req-sensitive"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == {
+        "code": "SENSITIVE_TEST",
+        "message": "Safe failure",
+        "request_id": "req-sensitive",
+        "retry_after": 30,
+    }
+    body_text = response.text
+    assert "proof-should-not-print" not in body_text
+    assert "refresh-should-not-print" not in body_text
+    assert "private.webm" not in body_text
+    assert "signature-secret" not in body_text
+    assert "token-should-not-print" not in body_text
 
 
 def test_validation_errors_do_not_echo_raw_inputs() -> None:

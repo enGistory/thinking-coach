@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  clearPendingAudioBestEffort,
   deletePendingAudioBestEffort,
   savePendingAudioBestEffort,
   type PendingAudioRecord,
@@ -40,5 +41,15 @@ describe("pending audio best-effort helpers", () => {
 
     await expect(deletePendingAudioBestEffort("attempt-1", remove)).resolves.toBe(false);
     expect(remove).toHaveBeenCalledWith("attempt-1");
+  });
+
+  it("does not fail deletion flows when local clear fails", async () => {
+    vi.stubGlobal("indexedDB", {});
+    const clear = vi.fn(async () => {
+      throw new Error("clear failed");
+    });
+
+    await expect(clearPendingAudioBestEffort(clear)).resolves.toBe(false);
+    expect(clear).toHaveBeenCalledOnce();
   });
 });

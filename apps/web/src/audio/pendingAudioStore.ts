@@ -47,6 +47,15 @@ export async function deletePendingAudio(attemptId: string): Promise<void> {
   }
 }
 
+export async function clearPendingAudio(): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await requestToPromise(db.transaction(STORE_NAME, "readwrite").objectStore(STORE_NAME).clear());
+  } finally {
+    db.close();
+  }
+}
+
 export async function savePendingAudioBestEffort(
   record: PendingAudioRecord,
   save: (record: PendingAudioRecord) => Promise<void> = savePendingAudio,
@@ -71,6 +80,20 @@ export async function deletePendingAudioBestEffort(
   }
   try {
     await remove(attemptId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function clearPendingAudioBestEffort(
+  clear: () => Promise<void> = clearPendingAudio,
+): Promise<boolean> {
+  if (!isPendingAudioStoreAvailable()) {
+    return false;
+  }
+  try {
+    await clear();
     return true;
   } catch {
     return false;

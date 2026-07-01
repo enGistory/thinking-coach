@@ -162,6 +162,43 @@ async def test_push_subscription_and_accept_hide_question_until_accept(
         assert question.exposed_count == 1
 
 
+async def test_accept_rejects_cross_user_question_reference(
+    client: AsyncClient,
+    db_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    owner_id = await _create_user(db_maker, "p10-owner-question-reference")
+    intruder_id = await _create_user(db_maker, "p10-intruder-question-reference")
+    token = _token(owner_id)
+    now = datetime.now(UTC)
+    session_id = await _seed_notified_session(db_maker, user_id=owner_id, now=now)
+
+    async with db_maker() as session:
+        intruder_question = await seed_ready_question(session, user_id=intruder_id)
+        intruder_question_id = intruder_question.id
+        training = await session.get(TrainingSession, session_id)
+        assert training is not None
+        training.question_id = intruder_question_id
+        await session.commit()
+
+    accepted = await client.post(
+        f"/api/v1/trainings/{session_id}/accept",
+        headers=_auth_headers(token),
+    )
+
+    assert accepted.status_code == 409
+    assert accepted.json()["error"]["code"] == "TRAINING_QUESTION_NOT_READY"
+
+    async with db_maker() as session:
+        training = await session.get(TrainingSession, session_id)
+        intruder_question = await session.get(Question, intruder_question_id)
+
+    assert training is not None
+    assert training.stage == "INVALID"
+    assert intruder_question is not None
+    assert intruder_question.status == "READY"
+    assert intruder_question.exposed_count == 0
+
+
 async def test_current_does_not_return_expired_notification(
     client: AsyncClient,
     db_maker: async_sessionmaker[AsyncSession],

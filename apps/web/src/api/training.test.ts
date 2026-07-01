@@ -4,11 +4,14 @@ import {
   abandonTraining,
   acceptTraining,
   createDuplicateComplaint,
+  createTrainingAppeal,
   createVoiceAttempt,
   deferTraining,
   fetchAttemptTranscript,
   fetchCurrentTraining,
+  fetchTrainingAppeals,
   fetchTrainingProvenance,
+  fetchTrainingReport,
   fetchTrainingState,
   resumeTraining,
   uploadAttemptAudio,
@@ -214,6 +217,128 @@ describe("training API", () => {
       JSON.stringify({
         reason: "same answer skeleton",
         duplicate_type: "answer_skeleton",
+      }),
+    );
+  });
+
+  it("fetches the completed report and unified appeal status with bearer auth", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      if (String(input).endsWith("/report")) {
+        return new Response(
+          JSON.stringify({
+            session_id: "session-1",
+            report_id: "report-1",
+            stage: "COMPLETED",
+            evaluated_at: "2026-06-25T00:00:00Z",
+            rubric_version: "p11-test",
+            total_score: 82,
+            logic_score: 80,
+            expression_score: 84,
+            adaptability_score: 81,
+            confidence: "high",
+            summary: "Evidence-backed report.",
+            source_summary: {
+              source_count: 1,
+              highest_source_level: "A",
+              credential: "SRC-P11",
+            },
+            issues: [
+              {
+                id: "issue-1",
+                attempt_id: "attempt-1",
+                attempt_stage: "FIRST",
+                transcript_segment_id: "segment-1",
+                category: "logic",
+                code: "ALIGN-01",
+                severity: 4,
+                confidence: "high",
+                quote: "I skipped the decision.",
+                start_ms: 100,
+                end_ms: 900,
+                explanation: "The answer missed the decision.",
+                missing_information: ["decision"],
+                correction_rule: "State the decision first.",
+              },
+            ],
+            similar_defects: [],
+            appeals: [],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify([
+          {
+            id: "appeal-1",
+            type: "source",
+            status: "OPEN",
+            target: { claim_id: "claim-1" },
+            reason: "source mismatch",
+            resolution: null,
+            created_at: "2026-06-25T00:00:00Z",
+          },
+        ]),
+        { status: 200 },
+      );
+    });
+
+    const report = await fetchTrainingReport("token-1", "session-1");
+    const appeals = await fetchTrainingAppeals("token-1", "session-1");
+
+    expect(report.issues[0]?.quote).toBe("I skipped the decision.");
+    expect(appeals[0]?.type).toBe("source");
+    expect(calls.map((call) => call.input)).toEqual([
+      "/api/v1/trainings/session-1/report",
+      "/api/v1/trainings/session-1/appeals",
+    ]);
+    for (const call of calls) {
+      expect(call.init?.headers).toEqual({ Authorization: "Bearer token-1" });
+    }
+  });
+
+  it("submits a structured source appeal with bearer auth", async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          id: "appeal-1",
+          session_id: "session-1",
+          issue_id: null,
+          defect_code: null,
+          type: "source",
+          target: { source_id: "source-1", claim_id: "claim-1" },
+          status: "OPEN",
+          reason: "Claim does not support the question.",
+          resolution: null,
+          created_at: "2026-06-25T00:00:00Z",
+        }),
+        { status: 201 },
+      );
+    });
+
+    const response = await createTrainingAppeal("token-1", "session-1", {
+      type: "source",
+      reason: "Claim does not support the question.",
+      source_id: "source-1",
+      claim_id: "claim-1",
+    });
+
+    expect(response.target.claim_id).toBe("claim-1");
+    expect(calls[0]?.input).toBe("/api/v1/trainings/session-1/appeals");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(calls[0]?.init?.headers).toEqual({
+      Authorization: "Bearer token-1",
+      "Content-Type": "application/json",
+    });
+    expect(calls[0]?.init?.body).toBe(
+      JSON.stringify({
+        type: "source",
+        reason: "Claim does not support the question.",
+        source_id: "source-1",
+        claim_id: "claim-1",
       }),
     );
   });

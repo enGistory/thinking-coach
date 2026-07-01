@@ -15,5 +15,8 @@ services/backend/.ruff_cache
 .env.*
 !.env.example
 secrets
+infra/env.production
+infra/certs/
+backups/
 *.pem
 *.key

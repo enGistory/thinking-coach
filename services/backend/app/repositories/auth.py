@@ -98,3 +98,16 @@ class RefreshTokenRepository:
 
     def revoke(self, token: RefreshToken, now: datetime) -> None:
         token.revoked_at = now
+
+    async def revoke_all_for_user(self, user_id: UUID, now: datetime) -> int:
+        result = await self._session.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.revoked_at.is_(None),
+            )
+        )
+        tokens = list(result.scalars().all())
+        for token in tokens:
+            token.revoked_at = now
+        await self._session.flush()
+        return len(tokens)

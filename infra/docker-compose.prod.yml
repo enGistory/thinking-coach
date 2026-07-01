@@ -1,0 +1,133 @@
+name: thinking-coach-prod
+
+x-backend-build: &backend-build
+  context: ..
+  dockerfile: services/backend/Dockerfile
+  args:
+    PYTHON_IMAGE: ${PYTHON_IMAGE:-docker.m.daocloud.io/library/python:3.12.13-slim-bookworm}
+    APT_MIRROR: ${APT_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/debian}
+    APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/debian-security}
+    PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+    UV_INDEX_URL: ${UV_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}
+
+x-backend-env: &backend-env
+  APP_ENV: ${APP_ENV:-production}
+  APP_BASE_URL: ${APP_BASE_URL}
+  WEB_BASE_URL: ${WEB_BASE_URL}
+  TZ: ${TZ:-Asia/Shanghai}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  DATABASE_SYNC_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  JWT_SECRET: ${JWT_SECRET}
+  LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY}
+  AUDIO_ROOT: /data/audio
+  AUDIO_RETENTION_DAYS: ${AUDIO_RETENTION_DAYS:-30}
+  MAX_AUDIO_SECONDS: ${MAX_AUDIO_SECONDS:-180}
+  MAX_AUDIO_MB: ${MAX_AUDIO_MB:-20}
+  STRIKE_NOTIFICATION_TTL_MINUTES: ${STRIKE_NOTIFICATION_TTL_MINUTES:-5}
+  AI_PROVIDER: ${AI_PROVIDER:-aliyun}
+  AI_PROVIDER_MODE: ${AI_PROVIDER_MODE:-aliyun}
+  DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY}
+  DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL}
+  DASHSCOPE_HTTP_BASE_URL: ${DASHSCOPE_HTTP_BASE_URL}
+  DASHSCOPE_WEBSOCKET_BASE_URL: ${DASHSCOPE_WEBSOCKET_BASE_URL}
+  QWEN_DIALOG_MODEL: ${QWEN_DIALOG_MODEL}
+  QWEN_QUESTION_MODEL: ${QWEN_QUESTION_MODEL}
+  QWEN_REVIEW_MODEL: ${QWEN_REVIEW_MODEL}
+  QWEN_VERIFY_MODEL: ${QWEN_VERIFY_MODEL}
+  QWEN_FALLBACK_MODEL: ${QWEN_FALLBACK_MODEL}
+  ALIYUN_ASR_MODEL: ${ALIYUN_ASR_MODEL}
+  ALIYUN_TTS_MODEL: ${ALIYUN_TTS_MODEL}
+  ALIYUN_TTS_VOICE: ${ALIYUN_TTS_VOICE}
+  ALIYUN_EMBEDDING_MODEL: ${ALIYUN_EMBEDDING_MODEL}
+  ALIYUN_EMBEDDING_DIMENSIONS: ${ALIYUN_EMBEDDING_DIMENSIONS:-1024}
+  SEARCH_PROVIDER: ${SEARCH_PROVIDER:-bocha}
+  BOCHA_API_KEY: ${BOCHA_API_KEY}
+  BOCHA_SEARCH_ENDPOINT: ${BOCHA_SEARCH_ENDPOINT:-https://api.bochaai.com/v1/web-search}
+  BOCHA_SEARCH_COUNT: ${BOCHA_SEARCH_COUNT:-8}
+  BOCHA_FRESHNESS: ${BOCHA_FRESHNESS:-oneYear}
+  WEB_PUSH_VAPID_PUBLIC_KEY: ${WEB_PUSH_VAPID_PUBLIC_KEY}
+  WEB_PUSH_VAPID_PRIVATE_KEY: ${WEB_PUSH_VAPID_PRIVATE_KEY}
+  WEB_PUSH_ALLOW_FAKE_IP_HOSTS: ${WEB_PUSH_ALLOW_FAKE_IP_HOSTS:-}
+  ALIYUN_OSS_ENDPOINT: ${ALIYUN_OSS_ENDPOINT:-}
+  ALIYUN_OSS_BUCKET: ${ALIYUN_OSS_BUCKET:-}
+  ALIYUN_OSS_ACCESS_KEY_ID: ${ALIYUN_OSS_ACCESS_KEY_ID:-}
+  ALIYUN_OSS_ACCESS_KEY_SECRET: ${ALIYUN_OSS_ACCESS_KEY_SECRET:-}
+  ALIYUN_OSS_SIGNED_URL_TTL_SECONDS: ${ALIYUN_OSS_SIGNED_URL_TTL_SECONDS:-900}
+
+services:
+  postgres:
+    image: ${PGVECTOR_IMAGE:-docker.m.daocloud.io/pgvector/pgvector:pg16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build: *backend-build
+    restart: unless-stopped
+    environment: *backend-env
+    command: >
+      sh -c "uv run alembic upgrade head &&
+      uv run python scripts/setup_checkpointer.py &&
+      uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      - audio_data:/data/audio
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: *backend-build
+    restart: unless-stopped
+    environment: *backend-env
+    command: uv run python -m app.workers.main
+    volumes:
+      - audio_data:/data/audio
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  scheduler:
+    build: *backend-build
+    restart: unless-stopped
+    environment: *backend-env
+    command: uv run python -m app.scheduler.main
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  nginx:
+    build:
+      context: ..
+      dockerfile: infra/nginx/Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22-bookworm-slim}
+        NGINX_IMAGE: ${NGINX_IMAGE:-docker.m.daocloud.io/library/nginx:1.27-alpine}
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/debian}
+        APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/debian-security}
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmmirror.com}
+        PNPM_VERSION: ${PNPM_VERSION:-10.26.1}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  audio_data:

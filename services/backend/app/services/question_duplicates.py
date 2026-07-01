@@ -46,8 +46,8 @@ class DuplicateQuestionService:
         if target is None:
             raise DuplicateQuestionError("DUPLICATE_COMPLAINT_TARGET_NOT_FOUND")
         if similar_question_id is not None:
-            similar = await self._source_repo.get_question(similar_question_id)
-            if similar is None or similar.user_id != user_id:
+            similar = await self._source_repo.get_question(similar_question_id, user_id=user_id)
+            if similar is None:
                 raise DuplicateQuestionError("DUPLICATE_SIMILAR_QUESTION_NOT_FOUND")
         if target.existing_complaint is not None:
             replacement_job = await self._job_repo.get_prepare_questions_job(user_id=user_id)

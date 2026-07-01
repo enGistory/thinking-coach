@@ -518,7 +518,17 @@ class SourceQuestionRepository:
         value = result.scalar_one_or_none()
         return str(value) if value is not None else None
 
-    async def get_question(self, question_id: UUID) -> Question | None:
+    async def get_question(
+        self,
+        question_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> Question | None:
+        if user_id is not None:
+            result = await self._session.execute(
+                select(Question).where(Question.id == question_id, Question.user_id == user_id)
+            )
+            return result.scalar_one_or_none()
         return await self._session.get(Question, question_id)
 
     async def get_fingerprint(self, question_id: UUID) -> QuestionFingerprint | None:
@@ -527,11 +537,19 @@ class SourceQuestionRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_source_bundle_for_question(self, question_id: UUID) -> SourceBundle | None:
+    async def get_source_bundle_for_question(
+        self,
+        question_id: UUID,
+        *,
+        user_id: UUID | None = None,
+    ) -> SourceBundle | None:
+        conditions = [Question.id == question_id]
+        if user_id is not None:
+            conditions.extend([Question.user_id == user_id, SourceBundle.user_id == user_id])
         result = await self._session.execute(
             select(SourceBundle)
             .join(Question, Question.source_bundle_id == SourceBundle.id)
-            .where(Question.id == question_id)
+            .where(*conditions)
         )
         return result.scalar_one_or_none()
 
