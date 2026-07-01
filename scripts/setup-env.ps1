@@ -57,6 +57,15 @@ function Invoke-External {
 function Assert-DockerCompose {
     Assert-Command "docker" "请先安装并启动 Docker Desktop。"
     Invoke-External "docker" @("compose", "version")
+    Assert-DockerDaemon
+}
+
+function Assert-DockerDaemon {
+    Write-Host "==> docker info --format {{.ServerVersion}}"
+    & docker info --format "{{.ServerVersion}}" *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker daemon 不可用。请启动 Docker Desktop，等待 Docker Engine running；如果当前使用 Windows containers，请切换到 Linux containers 后重试。"
+    }
 }
 
 function Install-LocalDependencies {
