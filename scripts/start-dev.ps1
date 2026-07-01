@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [switch]$Build,
-    [switch]$SkipHealthCheck
+    [switch]$SkipHealthCheck,
+    [string]$PythonImage = $(if ($env:PYTHON_IMAGE) { $env:PYTHON_IMAGE } else { "python:3.12.13-slim-bookworm" }),
+    [string]$NodeImage = $(if ($env:NODE_IMAGE) { $env:NODE_IMAGE } else { "node:22-bookworm-slim" }),
+    [string]$PgvectorImage = $(if ($env:PGVECTOR_IMAGE) { $env:PGVECTOR_IMAGE } else { "pgvector/pgvector:pg16" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,6 +65,22 @@ function Assert-DockerDaemon {
     }
 }
 
+function Set-ComposeImageEnvironment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonImage,
+        [Parameter(Mandatory = $true)]
+        [string]$NodeImage,
+        [Parameter(Mandatory = $true)]
+        [string]$PgvectorImage
+    )
+
+    $env:PYTHON_IMAGE = $PythonImage
+    $env:NODE_IMAGE = $NodeImage
+    $env:PGVECTOR_IMAGE = $PgvectorImage
+    Write-Host "Compose 镜像：PYTHON_IMAGE=$PythonImage NODE_IMAGE=$NodeImage PGVECTOR_IMAGE=$PgvectorImage"
+}
+
 function Wait-Http {
     param(
         [Parameter(Mandatory = $true)]
@@ -90,6 +109,7 @@ function Wait-Http {
 
 $repoRoot = Get-RepoRoot
 $composeFile = Join-Path $repoRoot "infra/docker-compose.yml"
+Set-ComposeImageEnvironment $PythonImage $NodeImage $PgvectorImage
 
 Assert-Command "docker" "请先安装并启动 Docker Desktop。"
 Invoke-External "docker" @("compose", "version")

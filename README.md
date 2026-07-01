@@ -33,8 +33,14 @@ AI 语音思维训练系统开发文档包 v1.0
 
 默认行为：
 
-- `setup-env.ps1` 检查 Docker Compose 并构建开发镜像；
+- `setup-env.ps1` 检查 Docker Compose，并默认使用 Docker Hub 官方 `python`、`node`、`pgvector` 镜像构建开发镜像；
 - `start-dev.ps1` 启动 Postgres，执行 Alembic 迁移，初始化 LangGraph checkpointer，再启动 api、worker、scheduler 和 web。
+
+如需使用公司代理或其他镜像源，可通过参数覆盖：
+
+```powershell
+.\scripts\setup-env.ps1 -PythonImage <python-image> -NodeImage <node-image> -PgvectorImage <pgvector-image>
+```
 
 启动后访问：
 
