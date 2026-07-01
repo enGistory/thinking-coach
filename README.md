@@ -21,3 +21,35 @@ AI 语音思维训练系统开发文档包 v1.0
 - 首次真实解析后生成并提交 uv.lock；后续 CI 使用 uv lock --check + uv sync --locked。
 
 注意：本包不会伪造 uv.lock。uv.lock 必须在可访问受信任包索引的开发机或 CI 中真实生成。
+
+## Windows 开发环境脚本
+
+新 Windows 电脑拉取代码后，优先使用 Docker Desktop 路线，不需要在宿主机直接安装 Python/Node 依赖：
+
+```powershell
+.\scripts\setup-env.ps1
+.\scripts\start-dev.ps1
+```
+
+默认行为：
+
+- `setup-env.ps1` 检查 Docker Compose 并构建开发镜像；
+- `start-dev.ps1` 启动 Postgres，执行 Alembic 迁移，初始化 LangGraph checkpointer，再启动 api、worker、scheduler 和 web。
+
+启动后访问：
+
+- 前端：`http://localhost:5173`
+- 后端健康检查：`http://localhost:8000/api/v1/health`
+- API 文档：`http://localhost:8000/docs`
+
+如果还需要在宿主机运行后端或前端检查命令，可在已安装 uv 0.11.23、Node.js 22 和 corepack 后同步本机依赖：
+
+```powershell
+.\scripts\setup-env.ps1 -LocalDeps -SkipDockerBuild
+```
+
+首次需要管理员账号时运行：
+
+```powershell
+docker compose -f infra/docker-compose.yml run --rm api uv run python -m app.scripts.create_admin --nickname admin
+```
