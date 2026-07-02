@@ -42,6 +42,12 @@ AI 语音思维训练系统开发文档包 v1.0
 .\scripts\setup-env.ps1 -PythonImage <python-image> -NodeImage <node-image> -PgvectorImage <pgvector-image>
 ```
 
+如果另一台 Windows 的 Docker Desktop 在 build 时返回 `_ping` 500，可先重启 Docker Desktop；仍失败时可临时关闭 BuildKit：
+
+```powershell
+.\scripts\setup-env.ps1 -NoBuildKit
+```
+
 启动后访问：
 
 - 前端：`http://localhost:5173`

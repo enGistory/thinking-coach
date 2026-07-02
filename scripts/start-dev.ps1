@@ -2,6 +2,7 @@
 param(
     [switch]$Build,
     [switch]$SkipHealthCheck,
+    [switch]$NoBuildKit,
     [string]$PythonImage = $(if ($env:PYTHON_IMAGE) { $env:PYTHON_IMAGE } else { "python:3.12.13-slim-bookworm" }),
     [string]$NodeImage = $(if ($env:NODE_IMAGE) { $env:NODE_IMAGE } else { "node:22-bookworm-slim" }),
     [string]$PgvectorImage = $(if ($env:PGVECTOR_IMAGE) { $env:PGVECTOR_IMAGE } else { "pgvector/pgvector:pg16" })
@@ -81,6 +82,49 @@ function Set-ComposeImageEnvironment {
     Write-Host "Compose 镜像：PYTHON_IMAGE=$PythonImage NODE_IMAGE=$NodeImage PGVECTOR_IMAGE=$PgvectorImage"
 }
 
+function Invoke-DockerComposeBuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ComposeFile,
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+        [switch]$NoBuildKit
+    )
+
+    $hadDockerBuildKit = Test-Path Env:\DOCKER_BUILDKIT
+    $previousDockerBuildKit = [Environment]::GetEnvironmentVariable("DOCKER_BUILDKIT", "Process")
+    $hadComposeDockerCliBuild = Test-Path Env:\COMPOSE_DOCKER_CLI_BUILD
+    $previousComposeDockerCliBuild = [Environment]::GetEnvironmentVariable(
+        "COMPOSE_DOCKER_CLI_BUILD",
+        "Process"
+    )
+
+    try {
+        if ($NoBuildKit) {
+            $env:DOCKER_BUILDKIT = "0"
+            $env:COMPOSE_DOCKER_CLI_BUILD = "0"
+            Write-Host "Docker BuildKit 已临时关闭：DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0"
+        }
+
+        Invoke-External "docker" @("compose", "-f", $ComposeFile, "build") $RepoRoot
+    }
+    finally {
+        if ($hadDockerBuildKit) {
+            $env:DOCKER_BUILDKIT = $previousDockerBuildKit
+        }
+        else {
+            Remove-Item Env:\DOCKER_BUILDKIT -ErrorAction SilentlyContinue
+        }
+
+        if ($hadComposeDockerCliBuild) {
+            $env:COMPOSE_DOCKER_CLI_BUILD = $previousComposeDockerCliBuild
+        }
+        else {
+            Remove-Item Env:\COMPOSE_DOCKER_CLI_BUILD -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Wait-Http {
     param(
         [Parameter(Mandatory = $true)]
@@ -116,7 +160,7 @@ Invoke-External "docker" @("compose", "version")
 Assert-DockerDaemon
 
 if ($Build) {
-    Invoke-External "docker" @("compose", "-f", $composeFile, "build") $repoRoot
+    Invoke-DockerComposeBuild -ComposeFile $composeFile -RepoRoot $repoRoot -NoBuildKit:$NoBuildKit
 }
 
 Invoke-External "docker" @("compose", "-f", $composeFile, "up", "-d", "postgres") $repoRoot
